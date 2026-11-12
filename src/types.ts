@@ -1,5 +1,6 @@
 import type { Usage } from "@earendil-works/pi-ai";
 
+export type { Usage };
 export type MessageRole = "user" | "assistant" | "toolResult" | "custom" | "bashExecution";
 export type SummaryKind = "leaf" | "condensed" | "legacy" | "oversized";
 export type SearchType = "message" | "summary" | "memory";

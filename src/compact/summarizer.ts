@@ -28,7 +28,7 @@ export function resolveModel(ctx: ExtensionContext, config: LcmConfig): PiModel<
 }
 
 export function createSummarizer(ctx: ExtensionContext, config: LcmConfig): Summarizer {
-  const model = resolveModel(ctx, config) as PiModel<Api> | undefined;
+  const model = resolveModel(ctx, config);
   if (!model) {
     throw new NoModelError();
   }

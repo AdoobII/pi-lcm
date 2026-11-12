@@ -1,5 +1,6 @@
 import type { Db } from "../db/driver.js";
 import { getSummaries } from "../store/summaries.js";
+import { estimateTokens } from "../util/tokens.js";
 import type { SummaryNode } from "../types.js";
 
 export interface RenderOptions {
@@ -35,23 +36,27 @@ function computeDescendantIds(nodes: SummaryNode[]): Set<string> {
   return descendants;
 }
 
-/**
- * Estimate token count from content by splitting on whitespace.
- */
-function estimateTokenCount(content: string): number {
-  return content.split(/\s+/).filter((t) => t.length > 0).length;
-}
+
 
 /**
  * Truncate content to fit within maxTokens, preserving at least minTokens.
+ * Note: The 200-token floor is mandated by design. Caller must guarantee maxTokens >= minTokens.
  */
 function truncateContent(content: string, maxTokens: number, minTokens: number): string {
-  const tokens = content.split(/\s+/).filter((t) => t.length > 0);
-  if (tokens.length <= maxTokens) {
+  // Use estimateTokens for consistency with node.tokenCount
+  const contentTokenCount = estimateTokens(content);
+  if (contentTokenCount <= maxTokens) {
     return content;
   }
+  // targetTokens uses Math.max to enforce the floor; caller guarantees maxTokens >= minTokens
   const targetTokens = Math.max(minTokens, maxTokens);
-  return tokens.slice(0, targetTokens).join(" ");
+  // We need to truncate the content to approximately targetTokens using the same metric
+  // estimateTokens uses Math.ceil(text.length / 4), so we work backwards
+  const targetLength = Math.floor(targetTokens * 4);
+  if (content.length <= targetLength) {
+    return content;
+  }
+  return content.slice(0, targetLength);
 }
 
 /**
@@ -68,7 +73,8 @@ export function renderContext(db: Db, sessionId: string, opts: RenderOptions): R
   // Sort legacy nodes: newest first (by createdAt DESC)
   legacyNodes.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
-  // Roots are non-legacy summaries with no parents and depth > 0
+  // Roots are non-legacy summaries with no parents and depth > 0.
+  // Depth-0 parentless summaries are standalone leaves and remain droppable.
   const roots = allSummaries.filter(
     (n) => n.kind !== "legacy" && n.parentIds.length === 0 && n.depth > 0
   );
@@ -140,7 +146,7 @@ export function renderContext(db: Db, sessionId: string, opts: RenderOptions): R
       usedTokens = legacyNodes.reduce((sum, n) => sum + n.tokenCount, 0);
       for (const node of roots) {
         if (node.id === oldestRoot.id) {
-          usedTokens += estimateTokenCount(truncated);
+          usedTokens += estimateTokens(truncated);
         } else {
           usedTokens += node.tokenCount;
         }

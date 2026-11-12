@@ -299,11 +299,13 @@ async function condenseDepth(
     }
 
     // Process each batch
+    let anyProcessed = false;
     for (const batch of batches) {
       // Skip batches with less than 2 nodes (shouldn't happen due to threshold)
       if (batch.length < 2) {
         continue;
       }
+      anyProcessed = true;
 
       // Build text for condensation
       const batchText = batch.map((n) => n.content).join("\n\n");
@@ -339,6 +341,11 @@ async function condenseDepth(
         messageIds: [],
         parentIds: batch.map((n) => n.id),
       });
+    }
+    
+    // If no batches were processed (all had < 2 nodes), break to avoid infinite loop
+    if (!anyProcessed) {
+      break;
     }
   }
 }

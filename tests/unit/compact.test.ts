@@ -4,7 +4,7 @@ import { migrate } from "../../src/db/schema.js";
 import { ensureProject } from "../../src/store/projects.js";
 import { ensureSession } from "../../src/store/sessions.js";
 import { insertMessages, getMessagesForSummary } from "../../src/store/messages.js";
-import { getLeaves, getRoots, insertSummary } from "../../src/store/summaries.js";
+import { getLeaves, getRoots, insertSummary, getSummaryParents } from "../../src/store/summaries.js";
 import { compactSpan, type CompactionDeps } from "../../src/compact/engine.js";
 import { DEFAULT_CONFIG } from "../../src/config.js";
 
@@ -146,75 +146,44 @@ describe("compactSpan", () => {
   });
 
   it("condensation respects budget hard constraint", async () => {
-    // Setup: create children whose combined tokens exceed the budget
-    deps.config = { ...DEFAULT_CONFIG, condenseThreshold: 2, condensedSummaryBudget: 100 };
+    // Setup: leafSummaryBudget: 1 with 4 messages produces 2 chunks/leaves via crossing rule
+    // condensedSummaryBudget: 1 means two leaf summaries (each 1 token) cannot fit in one batch (1+1=2>1)
+    deps.config = { ...DEFAULT_CONFIG, leafSummaryBudget: 1, condenseThreshold: 2, condensedSummaryBudget: 1 };
+    deps.modelLimit = 12000;
     
-    // First, insert messages that the summary nodes will reference
-    const messages = insertMessages(db, projectId, "s1", [
-      { entryId: "m1", role: "user" as const, content: "A", createdAt: "2026-01-01T00:00:00.000Z" },
-      { entryId: "m2", role: "user" as const, content: "B", createdAt: "2026-01-01T00:00:01.000Z" },
-      { entryId: "m3", role: "user" as const, content: "C", createdAt: "2026-01-01T00:00:02.000Z" },
-    ]);
-    
-    // Insert two leaf nodes with high token counts
-    const node1 = insertSummary(db, projectId, {
-      sessionId: "s1",
-      depth: 0,
-      kind: "leaf",
-      content: "A".repeat(50), // 50 tokens
-      tokenCount: 50,
-      messageIds: [messages[0]!.id],
-      parentIds: [],
-    });
-    
-    const node2 = insertSummary(db, projectId, {
-      sessionId: "s1",
-      depth: 0,
-      kind: "leaf",
-      content: "B".repeat(50), // 50 tokens
-      tokenCount: 50,
-      messageIds: [messages[1]!.id],
-      parentIds: [],
-    });
-    
-    const node3 = insertSummary(db, projectId, {
-      sessionId: "s1",
-      depth: 0,
-      kind: "leaf",
-      content: "C".repeat(50), // 50 tokens
-      tokenCount: 50,
-      messageIds: [messages[2]!.id],
-      parentIds: [],
-    });
-    
-    // Mock summarize to return a result
+    // Mock summarize to return a minimal 1-token summary
     deps.summarize = vi.fn(async () => ({
-      text: "condensed",
+      text: "x",
       usage: {
-        input: 100,
-        output: 10,
+        input: 10,
+        output: 1,
         cacheRead: 0,
         cacheWrite: 0,
-        totalTokens: 110,
+        totalTokens: 11,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
       },
     }));
     
-    // Trigger condensation by calling compactSpan which will call condenseDepth
-    await compactSpan(deps, span(0));
+    // Call compactSpan with 4 messages to create 2 leaf nodes, then trigger condensation
+    await compactSpan(deps, span(4));
     
-    // Check that no condensed node was created with children exceeding the budget
+    // Get all roots and check condensation results
     const roots = getRoots(db, "s1");
+    const leaves = roots.filter((r) => r.kind === "leaf");
     const condensedNodes = roots.filter((r) => r.kind === "condensed");
     
-    // With budget of 100, node1 + node2 = 100 tokens (at limit), node3 = 50 tokens
-    // The batching should not create a batch with node1 + node2 + node3 (150 > 100)
-    // It should create batches of at most 2 nodes each (50 + 50 = 100)
-    for (const condensed of condensedNodes) {
-      // Get the children of this condensed node
-      const children = roots.filter((r) => condensed.parentIds.includes(r.id));
-      const totalTokens = children.reduce((sum, c) => sum + c.tokenCount, 0);
-      expect(totalTokens).toBeLessThanOrEqual(deps.config.condensedSummaryBudget);
+    // With budget of 1, two leaves of 1 token each cannot fit in one batch (1+1=2>1)
+    // So no condensed node should be created
+    expect(condensedNodes).toHaveLength(0);
+    
+    // Both leaves should remain unparented (no summary_parents rows)
+    expect(leaves).toHaveLength(2);
+    for (const leaf of leaves) {
+      const parents = getSummaryParents(db, leaf.id);
+      expect(parents).toHaveLength(0);
     }
+    
+    // Vacuously: every condensed parent's children joined tokenCount is at most budget
+    // (no condensed parents exist, so this holds)
   });
 });

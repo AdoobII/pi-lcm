@@ -17,6 +17,20 @@ export interface Db {
 }
 
 /**
+ * Structural type for Bun's SQLite Database to avoid requiring Bun types at compile time.
+ */
+interface BunDatabase {
+  constructor: new (path: string) => BunDatabase;
+  exec(sql: string): void;
+  prepare(sql: string): {
+    run(...args: unknown[]): void;
+    get<T = unknown>(...args: unknown[]): T | undefined;
+    all<T = unknown>(...args: unknown[]): T[];
+  };
+  close(): void;
+}
+
+/**
  * Open a SQLite database. Uses bun:sqlite under Bun and node:sqlite under Node.
  */
 export async function openDatabase(path: string): Promise<Db> {
@@ -30,9 +44,12 @@ export async function openDatabase(path: string): Promise<Db> {
     // Cast to our structural type
     return db as unknown as Db;
   } else {
-    // Node: use node:sqlite via require to avoid Vite bundling issues
-    // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-explicit-any
-    const { DatabaseSync } = require("node:sqlite") as { DatabaseSync: any };
+    // Node: use node:sqlite
+    // Note: We use require() instead of await import() because Vite transforms
+    // node: imports to bare imports which fail at runtime. The declaration
+    // file (src/node-sqlite.d.ts) provides type safety for the require().
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { DatabaseSync } = require("node:sqlite");
     const db = new DatabaseSync(path);
     return {
       exec(sql: string): void {

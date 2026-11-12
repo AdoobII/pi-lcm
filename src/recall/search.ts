@@ -32,18 +32,18 @@ function queryTable(
   quotedQuery: string,
   limit: number
 ): RawHit[] {
-  const tableMap: Record<SearchType, { table: string; ftsTable: string; joinCol: string }> = {
-    message: { table: "messages", ftsTable: "messages_fts", joinCol: "id" },
-    summary: { table: "summaries", ftsTable: "summaries_fts", joinCol: "rowid" },
-    memory: { table: "memories", ftsTable: "memories_fts", joinCol: "rowid" },
+  const tableMap: Record<SearchType, { table: string; ftsTable: string }> = {
+    message: { table: "messages", ftsTable: "messages_fts" },
+    summary: { table: "summaries", ftsTable: "summaries_fts" },
+    memory: { table: "memories", ftsTable: "memories_fts" },
   };
 
-  const { table, ftsTable, joinCol } = tableMap[type];
+  const { table, ftsTable } = tableMap[type];
 
   // For messages, we need to join on messages_fts.rowid = messages.id
   // For summaries and memories, we join on ftsTable.rowid = table.rowid
   const isMessages = type === "message";
-  const tableAlias = isMessages ? "m" : type === "summary" ? "s" : "m";
+  const tableAlias = isMessages ? "msg" : type === "summary" ? "s" : "mem";
 
   const joinCondition = isMessages
     ? `${ftsTable}.rowid = ${tableAlias}.id`
@@ -112,9 +112,13 @@ export function searchAll(
     try {
       const rawHits = queryTable(db, projectId, type, quotedQuery, limit);
       allRawHits.push(...rawHits);
-    } catch {
-      // If a table doesn't exist or query fails, skip it
-      continue;
+    } catch (e) {
+      // Only skip if the table genuinely doesn't exist
+      const err = e as Error;
+      if (err.message?.toLowerCase().includes("no such table")) {
+        continue;
+      }
+      throw e;
     }
   }
 

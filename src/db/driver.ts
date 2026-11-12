@@ -44,11 +44,13 @@ export async function openDatabase(path: string): Promise<Db> {
     // Cast to our structural type
     return db as unknown as Db;
   } else {
-    // Node: use node:sqlite
-    // Note: We use require() instead of await import() because Vite transforms
-    // node: imports to bare imports which fail at runtime. The declaration
-    // file (src/node-sqlite.d.ts) provides type safety for the require().
+    // Node: use node:sqlite via createRequire to avoid Vite's dynamic-import
+    // transformation of node: protocol URLs. createRequire(import.meta.url)
+    // resolves to the current module's require, which correctly handles node:
+    // prefixed built-in modules in Node ESM, Vitest, and jiti.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { createRequire } = await import("node:module");
+    const require = createRequire(import.meta.url);
     const { DatabaseSync } = require("node:sqlite");
     const db = new DatabaseSync(path);
     return {

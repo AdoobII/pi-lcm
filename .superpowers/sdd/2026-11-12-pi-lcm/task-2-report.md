@@ -101,15 +101,16 @@ feat: add sqlite driver and schema migrations
 
 1. **Created `src/node-sqlite.d.ts`**
    - Added minimal type declarations for `node:sqlite` module
-   - Declares `DatabaseSync` and `StatementSync` interfaces with required methods
+   - Declares `export class DatabaseSync` and `export class StatementSync` (not interfaces) so `new DatabaseSync(path)` type-checks correctly
    - Enables type-safe usage of `node:sqlite` without runtime dependencies
 
 2. **Updated `src/db/driver.ts`**
    - Added local structural type `BunDatabase` for Bun's SQLite Database to avoid `as any` cast
-   - Note: Kept `require("node:sqlite")` for Node.js path due to Vite's transformation of `node:` imports in dynamic imports
-     - Vite transforms `await import("node:sqlite")` to `await import("sqlite")`, causing runtime failures
-     - The declaration file (`src/node-sqlite.d.ts`) provides type safety for the `require()` call
-     - In production (outside Vite), `await import("node:sqlite")` would work as expected
+   - Replaced `require("node:sqlite")` with `createRequire(import.meta.url)("node:sqlite")` from `node:module`
+     - This works in Node ESM, Vitest, and jiti
+     - Avoids Vite's dynamic-import transformation of `node:` protocol URLs
+     - Added comment explaining why `createRequire` is used
+   - Kept `await import("bun:sqlite")` for Bun path
 
 ### Covering Tests
 
@@ -117,8 +118,15 @@ feat: add sqlite driver and schema migrations
 
 **Output:**
 ```
-(node:30352) ExperimentalWarning: SQLite is an experimental feature and might change at any time
- ✓ tests/unit/db.test.ts (3 tests) 10ms
+> pi-lcm@0.1.0 test
+> vitest run tests/unit/db.test.ts
+
+ RUN  v2.1.9 /mnt/c/Users/Adib/dev/repos/pi-lcm
+
+(node:30922) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/unit/db.test.ts (3 tests) 11ms
+
  Test Files  1 passed (1)
       Tests  3 passed (3)
 ```

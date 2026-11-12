@@ -1,0 +1,225 @@
+import type { Db } from "./driver.js";
+
+export const SCHEMA_VERSION = 1;
+
+export class SchemaTooNewError extends Error {
+  constructor(public readonly current: number, public readonly expected: number) {
+    super(`Schema version ${current} is newer than expected ${expected}`);
+    this.name = "SchemaTooNewError";
+  }
+}
+
+function getCurrentVersion(db: Db): number | null {
+  try {
+    const row = db
+      .prepare("SELECT value FROM meta WHERE key = 'schema_version'")
+      .get<{ value: string }>();
+    if (row && row.value) {
+      return parseInt(row.value, 10);
+    }
+  } catch {
+    // Table may not exist yet
+  }
+  return null;
+}
+
+function ensureMetaTable(db: Db): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )
+  `);
+}
+
+function runMigration1(db: Db): void {
+  db.exec(`
+    BEGIN TRANSACTION;
+
+    -- Projects table
+    CREATE TABLE IF NOT EXISTS projects (
+      id TEXT PRIMARY KEY,
+      root TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Sessions table
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      cwd TEXT NOT NULL,
+      session_file TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (project_id) REFERENCES projects(id)
+    );
+
+    -- Messages table
+    CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      entry_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('user','assistant','toolResult','custom','bashExecution')),
+      content TEXT NOT NULL,
+      token_count INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (project_id) REFERENCES projects(id),
+      FOREIGN KEY (session_id) REFERENCES sessions(id)
+    );
+
+    -- Summaries table
+    CREATE TABLE IF NOT EXISTS summaries (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      depth INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      content TEXT NOT NULL,
+      token_count INTEGER NOT NULL,
+      start_seq INTEGER NULL,
+      end_seq INTEGER NULL,
+      message_count INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      earliest_at TEXT NULL,
+      latest_at TEXT NULL,
+      FOREIGN KEY (project_id) REFERENCES projects(id),
+      FOREIGN KEY (session_id) REFERENCES sessions(id)
+    );
+
+    -- Summary to message mapping (many-to-many)
+    CREATE TABLE IF NOT EXISTS summary_messages (
+      summary_id TEXT NOT NULL,
+      message_id INTEGER NOT NULL,
+      PRIMARY KEY (summary_id, message_id),
+      FOREIGN KEY (summary_id) REFERENCES summaries(id),
+      FOREIGN KEY (message_id) REFERENCES messages(id)
+    );
+
+    -- Summary parent relationships
+    CREATE TABLE IF NOT EXISTS summary_parents (
+      summary_id TEXT NOT NULL,
+      parent_id TEXT NOT NULL,
+      PRIMARY KEY (summary_id, parent_id),
+      FOREIGN KEY (summary_id) REFERENCES summaries(id),
+      FOREIGN KEY (parent_id) REFERENCES summaries(id)
+    );
+
+    -- Memories table
+    CREATE TABLE IF NOT EXISTS memories (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      content TEXT NOT NULL,
+      tags TEXT NOT NULL DEFAULT '[]',
+      source TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_used_at TEXT NULL,
+      use_count INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (project_id) REFERENCES projects(id)
+    );
+
+    -- Indexes
+    CREATE INDEX IF NOT EXISTS idx_messages_session_seq ON messages(session_id, seq);
+    CREATE INDEX IF NOT EXISTS idx_summaries_session_depth ON summaries(session_id, depth);
+    CREATE INDEX IF NOT EXISTS idx_summary_messages_message_id ON summary_messages(message_id);
+    CREATE INDEX IF NOT EXISTS idx_summary_parents_parent_id ON summary_parents(parent_id);
+    CREATE INDEX IF NOT EXISTS idx_memories_project_id ON memories(project_id);
+
+    -- FTS5 virtual tables
+    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+      content,
+      content='messages',
+      content_rowid='id',
+      tokenize='unicode61 remove_diacritics 2'
+    );
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS summaries_fts USING fts5(
+      content,
+      content='summaries',
+      content_rowid='rowid',
+      tokenize='unicode61 remove_diacritics 2'
+    );
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+      content, tags,
+      content='memories',
+      content_rowid='rowid',
+      tokenize='unicode61 remove_diacritics 2'
+    );
+
+    -- Triggers for messages_fts (ai = after insert, ad = after delete, au = after update)
+    CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+      INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid) VALUES ('delete', old.id);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+      INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+    END;
+
+    -- Triggers for summaries_fts
+    CREATE TRIGGER IF NOT EXISTS summaries_fts_ai AFTER INSERT ON summaries BEGIN
+      INSERT INTO summaries_fts(rowid, content) VALUES (new.rowid, new.content);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS summaries_fts_ad AFTER DELETE ON summaries BEGIN
+      INSERT INTO summaries_fts(summaries_fts, rowid) VALUES ('delete', old.rowid);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS summaries_fts_au AFTER UPDATE ON summaries BEGIN
+      INSERT INTO summaries_fts(summaries_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+      INSERT INTO summaries_fts(rowid, content) VALUES (new.rowid, new.content);
+    END;
+
+    -- Triggers for memories_fts
+    CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+      INSERT INTO memories_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+      INSERT INTO memories_fts(memories_fts, rowid) VALUES ('delete', old.rowid);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE ON memories BEGIN
+      INSERT INTO memories_fts(memories_fts, rowid, content, tags) VALUES ('delete', old.rowid, old.content, old.tags);
+      INSERT INTO memories_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags);
+    END;
+
+    -- Record schema version
+    INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '1');
+
+    COMMIT;
+  `);
+}
+
+/**
+ * Run migrations on the database. Idempotent and synchronous.
+ * Throws SchemaTooNewError if the stored version is newer than SCHEMA_VERSION.
+ */
+export function migrate(db: Db): void {
+  // Set pragmas - ignore WAL failure on :memory:
+  try {
+    db.exec("PRAGMA journal_mode = WAL;");
+  } catch {
+    // WAL mode fails on :memory:, that's fine
+  }
+  db.exec("PRAGMA foreign_keys = ON;");
+  db.exec("PRAGMA busy_timeout = 5000;");
+
+  ensureMetaTable(db);
+
+  const currentVersion = getCurrentVersion(db);
+
+  if (currentVersion !== null && currentVersion > SCHEMA_VERSION) {
+    throw new SchemaTooNewError(currentVersion, SCHEMA_VERSION);
+  }
+
+  if (currentVersion === null || currentVersion < SCHEMA_VERSION) {
+    runMigration1(db);
+  }
+}

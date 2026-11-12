@@ -233,9 +233,11 @@ function runMigration3(db: Db): void {
 
   if (!hasContentHash) {
     db.exec(`ALTER TABLE memories ADD COLUMN content_hash TEXT;`);
-    // Add a unique index on (project_id, content_hash) for deduplication
-    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_project_content_hash ON memories(project_id, content_hash)`);
   }
+
+  // Add a unique index on (project_id, content_hash) for deduplication
+  // This must run unconditionally after the column is ensured
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_project_content_hash ON memories(project_id, content_hash)`);
 
   // Update schema version
   db.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '3')");

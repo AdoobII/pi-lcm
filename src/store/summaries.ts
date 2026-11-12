@@ -3,6 +3,100 @@ import { createHash } from "node:crypto";
 import type { Db } from "../db/driver.js";
 import type { SummaryInput, SummaryNode } from "../types.js";
 
+// Row type for summary queries
+interface SummaryRow {
+  id: string;
+  project_id: string;
+  session_id: string;
+  depth: number;
+  kind: string;
+  content: string;
+  token_count: number;
+  start_seq: number | null;
+  end_seq: number | null;
+  message_count: number;
+  created_at: string;
+  earliest_at: string | null;
+  latest_at: string | null;
+}
+
+// Batch-load parent relationships: for each summary_id, get its parent_ids
+function loadParentIds(db: Db, summaryIds: string[]): Map<string, string[]> {
+  if (summaryIds.length === 0) {
+    return new Map();
+  }
+  const placeholders = summaryIds.map(() => "?").join(", ");
+  const rows = db
+    .prepare(`SELECT summary_id, parent_id FROM summary_parents WHERE summary_id IN (${placeholders})`)
+    .all<{ summary_id: string; parent_id: string }>(...summaryIds);
+  
+  const result = new Map<string, string[]>();
+  for (const row of rows) {
+    if (!result.has(row.summary_id)) {
+      result.set(row.summary_id, []);
+    }
+    result.get(row.summary_id)!.push(row.parent_id);
+  }
+  return result;
+}
+
+// Batch-load child relationships: for each parent_id, get its child summary_ids
+function loadChildIds(db: Db, parentIds: string[]): Map<string, string[]> {
+  if (parentIds.length === 0) {
+    return new Map();
+  }
+  const placeholders = parentIds.map(() => "?").join(", ");
+  const rows = db
+    .prepare(`SELECT summary_id, parent_id FROM summary_parents WHERE parent_id IN (${placeholders})`)
+    .all<{ summary_id: string; parent_id: string }>(...parentIds);
+  
+  const result = new Map<string, string[]>();
+  for (const row of rows) {
+    if (!result.has(row.parent_id)) {
+      result.set(row.parent_id, []);
+    }
+    result.get(row.parent_id)!.push(row.summary_id);
+  }
+  return result;
+}
+
+// Map a row to a SummaryNode with parent/child IDs from the batch-loaded maps
+function mapToSummaryNode(row: SummaryRow, parentIdsMap: Map<string, string[]>, childIdsMap: Map<string, string[]>): SummaryNode {
+  const parentIds = parentIdsMap.get(row.id) ?? [];
+  const childIds = childIdsMap.get(row.id) ?? [];
+  
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    sessionId: row.session_id,
+    depth: row.depth,
+    kind: row.kind as "leaf" | "condensed" | "legacy" | "oversized",
+    content: row.content,
+    tokenCount: row.token_count,
+    startSeq: row.start_seq,
+    endSeq: row.end_seq,
+    messageCount: row.message_count,
+    createdAt: row.created_at,
+    earliestAt: row.earliest_at,
+    latestAt: row.latest_at,
+    parentIds,
+    childIds,
+  };
+}
+
+// Load SummaryNodes from rows, batch-loading parent and child relationships
+function loadSummaryNodes(db: Db, rows: SummaryRow[]): SummaryNode[] {
+  if (rows.length === 0) {
+    return [];
+  }
+  
+  const summaryIds = rows.map((r) => r.id);
+  const parentIdsMap = loadParentIds(db, summaryIds);
+  const childIdsMap = loadChildIds(db, summaryIds);
+  
+  return rows.map((row) => mapToSummaryNode(row, parentIdsMap, childIdsMap));
+}
+
 export function insertSummary(db: Db, projectId: string, input: SummaryInput): SummaryNode {
   const createdAt = input.createdAt ?? new Date().toISOString();
   
@@ -104,7 +198,6 @@ export function insertSummary(db: Db, projectId: string, input: SummaryInput): S
 
     // Load parentIds and childIds for the returned node
     const parentIds = input.parentIds.slice();
-
     const childIds = db
       .prepare(
         `SELECT summary_id FROM summary_parents WHERE parent_id = ?`
@@ -145,59 +238,14 @@ export function getSummary(db: Db, id: string): SummaryNode | undefined {
               start_seq, end_seq, message_count, created_at, earliest_at, latest_at
        FROM summaries WHERE id = ?`
     )
-    .get<{
-      id: string;
-      project_id: string;
-      session_id: string;
-      depth: number;
-      kind: string;
-      content: string;
-      token_count: number;
-      start_seq: number | null;
-      end_seq: number | null;
-      message_count: number;
-      created_at: string;
-      earliest_at: string | null;
-      latest_at: string | null;
-    }>(id);
+    .get<SummaryRow>(id);
 
   if (!row) {
     return undefined;
   }
 
-  // Load parent IDs
-  const parentIds = db
-    .prepare(
-      `SELECT parent_id FROM summary_parents WHERE summary_id = ?`
-    )
-    .all<{ parent_id: string }>(id)
-    .map((r) => r.parent_id);
-
-  // Load child IDs
-  const childIds = db
-    .prepare(
-      `SELECT summary_id FROM summary_parents WHERE parent_id = ?`
-    )
-    .all<{ summary_id: string }>(id)
-    .map((r) => r.summary_id);
-
-  return {
-    id: row.id,
-    projectId: row.project_id,
-    sessionId: row.session_id,
-    depth: row.depth,
-    kind: row.kind as "leaf" | "condensed" | "legacy" | "oversized",
-    content: row.content,
-    tokenCount: row.token_count,
-    startSeq: row.start_seq,
-    endSeq: row.end_seq,
-    messageCount: row.message_count,
-    createdAt: row.created_at,
-    earliestAt: row.earliest_at,
-    latestAt: row.latest_at,
-    parentIds,
-    childIds,
-  };
+  const nodes = loadSummaryNodes(db, [row]);
+  return nodes[0];
 }
 
 export function getSummaries(db: Db, sessionId: string): SummaryNode[] {
@@ -207,55 +255,9 @@ export function getSummaries(db: Db, sessionId: string): SummaryNode[] {
               start_seq, end_seq, message_count, created_at, earliest_at, latest_at
        FROM summaries WHERE session_id = ? ORDER BY created_at ASC`
     )
-    .all<{
-      id: string;
-      project_id: string;
-      session_id: string;
-      depth: number;
-      kind: string;
-      content: string;
-      token_count: number;
-      start_seq: number | null;
-      end_seq: number | null;
-      message_count: number;
-      created_at: string;
-      earliest_at: string | null;
-      latest_at: string | null;
-    }>(sessionId);
+    .all<SummaryRow>(sessionId);
 
-  return rows.map((row) => {
-    const parentIds = db
-      .prepare(
-        `SELECT parent_id FROM summary_parents WHERE summary_id = ?`
-      )
-      .all<{ parent_id: string }>(row.id)
-      .map((r) => r.parent_id);
-
-    const childIds = db
-      .prepare(
-        `SELECT summary_id FROM summary_parents WHERE parent_id = ?`
-      )
-      .all<{ summary_id: string }>(row.id)
-      .map((r) => r.summary_id);
-
-    return {
-      id: row.id,
-      projectId: row.project_id,
-      sessionId: row.session_id,
-      depth: row.depth,
-      kind: row.kind as "leaf" | "condensed" | "legacy" | "oversized",
-      content: row.content,
-      tokenCount: row.token_count,
-      startSeq: row.start_seq,
-      endSeq: row.end_seq,
-      messageCount: row.message_count,
-      createdAt: row.created_at,
-      earliestAt: row.earliest_at,
-      latestAt: row.latest_at,
-      parentIds,
-      childIds,
-    };
-  });
+  return loadSummaryNodes(db, rows);
 }
 
 export function getRoots(db: Db, sessionId: string): SummaryNode[] {
@@ -269,50 +271,9 @@ export function getRoots(db: Db, sessionId: string): SummaryNode[] {
        WHERE s.session_id = ? AND sp.summary_id IS NULL
        ORDER BY s.depth DESC, s.created_at ASC`
     )
-    .all<{
-      id: string;
-      project_id: string;
-      session_id: string;
-      depth: number;
-      kind: string;
-      content: string;
-      token_count: number;
-      start_seq: number | null;
-      end_seq: number | null;
-      message_count: number;
-      created_at: string;
-      earliest_at: string | null;
-      latest_at: string | null;
-    }>(sessionId);
+    .all<SummaryRow>(sessionId);
 
-  return rows.map((row) => {
-    const parentIds: string[] = [];
-
-    const childIds = db
-      .prepare(
-        `SELECT summary_id FROM summary_parents WHERE parent_id = ?`
-      )
-      .all<{ summary_id: string }>(row.id)
-      .map((r) => r.summary_id);
-
-    return {
-      id: row.id,
-      projectId: row.project_id,
-      sessionId: row.session_id,
-      depth: row.depth,
-      kind: row.kind as "leaf" | "condensed" | "legacy" | "oversized",
-      content: row.content,
-      tokenCount: row.token_count,
-      startSeq: row.start_seq,
-      endSeq: row.end_seq,
-      messageCount: row.message_count,
-      createdAt: row.created_at,
-      earliestAt: row.earliest_at,
-      latestAt: row.latest_at,
-      parentIds,
-      childIds,
-    };
-  });
+  return loadSummaryNodes(db, rows);
 }
 
 export function getLeaves(db: Db, sessionId: string): SummaryNode[] {
@@ -325,55 +286,9 @@ export function getLeaves(db: Db, sessionId: string): SummaryNode[] {
        WHERE session_id = ? AND depth = 0
        ORDER BY created_at ASC`
     )
-    .all<{
-      id: string;
-      project_id: string;
-      session_id: string;
-      depth: number;
-      kind: string;
-      content: string;
-      token_count: number;
-      start_seq: number | null;
-      end_seq: number | null;
-      message_count: number;
-      created_at: string;
-      earliest_at: string | null;
-      latest_at: string | null;
-    }>(sessionId);
+    .all<SummaryRow>(sessionId);
 
-  return rows.map((row) => {
-    const parentIds = db
-      .prepare(
-        `SELECT parent_id FROM summary_parents WHERE summary_id = ?`
-      )
-      .all<{ parent_id: string }>(row.id)
-      .map((r) => r.parent_id);
-
-    const childIds = db
-      .prepare(
-        `SELECT summary_id FROM summary_parents WHERE parent_id = ?`
-      )
-      .all<{ summary_id: string }>(row.id)
-      .map((r) => r.summary_id);
-
-    return {
-      id: row.id,
-      projectId: row.project_id,
-      sessionId: row.session_id,
-      depth: row.depth,
-      kind: row.kind as "leaf" | "condensed" | "legacy" | "oversized",
-      content: row.content,
-      tokenCount: row.token_count,
-      startSeq: row.start_seq,
-      endSeq: row.end_seq,
-      messageCount: row.message_count,
-      createdAt: row.created_at,
-      earliestAt: row.earliest_at,
-      latestAt: row.latest_at,
-      parentIds,
-      childIds,
-    };
-  });
+  return loadSummaryNodes(db, rows);
 }
 
 export function getUnparentedAtDepth(db: Db, sessionId: string, depth: number): SummaryNode[] {
@@ -387,50 +302,9 @@ export function getUnparentedAtDepth(db: Db, sessionId: string, depth: number): 
        WHERE s.session_id = ? AND s.depth = ? AND sp.summary_id IS NULL
        ORDER BY s.created_at ASC`
     )
-    .all<{
-      id: string;
-      project_id: string;
-      session_id: string;
-      depth: number;
-      kind: string;
-      content: string;
-      token_count: number;
-      start_seq: number | null;
-      end_seq: number | null;
-      message_count: number;
-      created_at: string;
-      earliest_at: string | null;
-      latest_at: string | null;
-    }>(sessionId, depth);
+    .all<SummaryRow>(sessionId, depth);
 
-  return rows.map((row) => {
-    const parentIds: string[] = [];
-
-    const childIds = db
-      .prepare(
-        `SELECT summary_id FROM summary_parents WHERE parent_id = ?`
-      )
-      .all<{ summary_id: string }>(row.id)
-      .map((r) => r.summary_id);
-
-    return {
-      id: row.id,
-      projectId: row.project_id,
-      sessionId: row.session_id,
-      depth: row.depth,
-      kind: row.kind as "leaf" | "condensed" | "legacy" | "oversized",
-      content: row.content,
-      tokenCount: row.token_count,
-      startSeq: row.start_seq,
-      endSeq: row.end_seq,
-      messageCount: row.message_count,
-      createdAt: row.created_at,
-      earliestAt: row.earliest_at,
-      latestAt: row.latest_at,
-      parentIds,
-      childIds,
-    };
-  });
+  return loadSummaryNodes(db, rows);
 }
 
 export function getSummaryMessageIds(db: Db, summaryId: string): number[] {
@@ -463,55 +337,9 @@ export function getSummaryChildren(db: Db, summaryId: string): SummaryNode[] {
               start_seq, end_seq, message_count, created_at, earliest_at, latest_at
        FROM summaries WHERE id IN (${placeholders})`
     )
-    .all<{
-      id: string;
-      project_id: string;
-      session_id: string;
-      depth: number;
-      kind: string;
-      content: string;
-      token_count: number;
-      start_seq: number | null;
-      end_seq: number | null;
-      message_count: number;
-      created_at: string;
-      earliest_at: string | null;
-      latest_at: string | null;
-    }>(...childIds);
+    .all<SummaryRow>(...childIds);
 
-  return rows.map((row) => {
-    const parentIds = db
-      .prepare(
-        `SELECT parent_id FROM summary_parents WHERE summary_id = ?`
-      )
-      .all<{ parent_id: string }>(row.id)
-      .map((r) => r.parent_id);
-
-    const childIdsForRow = db
-      .prepare(
-        `SELECT summary_id FROM summary_parents WHERE parent_id = ?`
-      )
-      .all<{ summary_id: string }>(row.id)
-      .map((r) => r.summary_id);
-
-    return {
-      id: row.id,
-      projectId: row.project_id,
-      sessionId: row.session_id,
-      depth: row.depth,
-      kind: row.kind as "leaf" | "condensed" | "legacy" | "oversized",
-      content: row.content,
-      tokenCount: row.token_count,
-      startSeq: row.start_seq,
-      endSeq: row.end_seq,
-      messageCount: row.message_count,
-      createdAt: row.created_at,
-      earliestAt: row.earliest_at,
-      latestAt: row.latest_at,
-      parentIds,
-      childIds: childIdsForRow,
-    };
-  });
+  return loadSummaryNodes(db, rows);
 }
 
 export function getSummaryParents(db: Db, summaryId: string): SummaryNode[] {
@@ -534,55 +362,9 @@ export function getSummaryParents(db: Db, summaryId: string): SummaryNode[] {
               start_seq, end_seq, message_count, created_at, earliest_at, latest_at
        FROM summaries WHERE id IN (${placeholders})`
     )
-    .all<{
-      id: string;
-      project_id: string;
-      session_id: string;
-      depth: number;
-      kind: string;
-      content: string;
-      token_count: number;
-      start_seq: number | null;
-      end_seq: number | null;
-      message_count: number;
-      created_at: string;
-      earliest_at: string | null;
-      latest_at: string | null;
-    }>(...parentIds);
+    .all<SummaryRow>(...parentIds);
 
-  return rows.map((row) => {
-    const parentIdsForRow = db
-      .prepare(
-        `SELECT parent_id FROM summary_parents WHERE summary_id = ?`
-      )
-      .all<{ parent_id: string }>(row.id)
-      .map((r) => r.parent_id);
-
-    const childIds = db
-      .prepare(
-        `SELECT summary_id FROM summary_parents WHERE parent_id = ?`
-      )
-      .all<{ summary_id: string }>(row.id)
-      .map((r) => r.summary_id);
-
-    return {
-      id: row.id,
-      projectId: row.project_id,
-      sessionId: row.session_id,
-      depth: row.depth,
-      kind: row.kind as "leaf" | "condensed" | "legacy" | "oversized",
-      content: row.content,
-      tokenCount: row.token_count,
-      startSeq: row.start_seq,
-      endSeq: row.end_seq,
-      messageCount: row.message_count,
-      createdAt: row.created_at,
-      earliestAt: row.earliest_at,
-      latestAt: row.latest_at,
-      parentIds: parentIdsForRow,
-      childIds,
-    };
-  });
+  return loadSummaryNodes(db, rows);
 }
 
 export function countSummaries(db: Db, projectId: string): number {

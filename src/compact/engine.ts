@@ -123,16 +123,31 @@ function serializeMessages(messages: StoredMessage[]): string {
 }
 
 /**
- * Process a single chunk: either oversized or summarize.
+ * Node data for deferred insertion.
  */
-async function processChunk(
+interface PendingNode {
+  sessionId: string;
+  depth: number;
+  kind: "leaf" | "oversized";
+  content: string;
+  tokenCount: number;
+  messageIds: number[];
+  parentIds: string[];
+  memories?: MemoryDraft[];
+}
+
+/**
+ * Process a single chunk: either oversized or summarize.
+ * Returns node data without inserting into DB to allow for retry logic.
+ */
+async function prepareChunk(
   deps: CompactionDeps,
   chunk: { messages: StoredMessage[]; oversized: boolean },
   customInstructions: string | undefined,
   signal: AbortSignal | undefined,
   usages: Usage[]
-): Promise<SummaryNode | null> {
-  const { db, projectId, sessionId, config, modelLimit } = deps;
+): Promise<PendingNode | null> {
+  const { config } = deps;
 
   if (chunk.oversized) {
     // Build deterministic content for oversized node
@@ -152,7 +167,6 @@ async function processChunk(
         contentParts.push(line);
         currentLength += line.length;
       } else {
-        // Truncate the last line to fit
         const remaining = maxContentLength - currentLength;
         if (remaining > 0) {
           contentParts.push(line.slice(0, remaining));
@@ -165,15 +179,15 @@ async function processChunk(
     const content = contentParts.join("\n");
     const tokenCount = estimateTokens(content);
 
-    return insertSummary(db, projectId, {
-      sessionId,
+    return {
+      sessionId: deps.sessionId,
       depth: 0,
       kind: "oversized",
       content,
       tokenCount,
       messageIds: chunk.messages.map((m) => m.id),
       parentIds: [],
-    });
+    };
   }
 
   // Normal chunk: serialize and summarize
@@ -202,26 +216,45 @@ async function processChunk(
 
   const tokenCount = estimateTokens(result.text);
 
-  // Insert leaf node
-  const node = insertSummary(db, projectId, {
-    sessionId,
+  // Parse memories if autoMemories is enabled
+  const memories = deps.config.autoMemories 
+    ? parseMemories(result.text)
+    : undefined;
+
+  return {
+    sessionId: deps.sessionId,
     depth: 0,
     kind: "leaf",
     content: result.text,
     tokenCount,
     messageIds: chunk.messages.map((m) => m.id),
     parentIds: [],
+    memories,
+  };
+}
+
+/**
+ * Insert a pending node into the database.
+ */
+function insertPendingNode(db: Db, projectId: string, node: PendingNode): SummaryNode {
+  const inserted = insertSummary(db, projectId, {
+    sessionId: node.sessionId,
+    depth: node.depth,
+    kind: node.kind,
+    content: node.content,
+    tokenCount: node.tokenCount,
+    messageIds: node.messageIds,
+    parentIds: node.parentIds,
   });
 
-  // Parse and insert memories if autoMemories is enabled
-  if (config.autoMemories) {
-    const memories = parseMemories(result.text);
-    for (const draft of memories) {
+  // Insert memories if present
+  if (node.memories) {
+    for (const draft of node.memories) {
       insertMemory(db, projectId, draft.content, draft.tags ?? [], "auto");
     }
   }
 
-  return node;
+  return inserted;
 }
 
 /**
@@ -248,12 +281,10 @@ async function condenseDepth(
 
     for (const node of unparented) {
       // Check if adding this node would exceed the budget
-      // We need at least 2 nodes per batch, so we need to be careful
-      if (currentBatch.length >= 2 && currentBatchTokens + node.tokenCount > config.condensedSummaryBudget) {
+      // The budget is a hard constraint; check it before adding any node
+      if (currentBatch.length > 0 && currentBatchTokens + node.tokenCount > config.condensedSummaryBudget) {
         // Close current batch and start a new one
-        if (currentBatch.length > 0) {
-          batches.push(currentBatch);
-        }
+        batches.push(currentBatch);
         currentBatch = [node];
         currentBatchTokens = node.tokenCount;
       } else {
@@ -355,18 +386,19 @@ export async function compactSpan(
     });
 
     // 4. Process each chunk
-    const chunkNodes: SummaryNode[] = [];
+    // Use deferred insertion to prevent duplicate coverage on span retry
+    const pendingNodes: PendingNode[] = [];
+    let spanRetryUsed = false;
 
     for (const chunk of chunks) {
-      let node: SummaryNode | null = null;
+      let pendingNode: PendingNode | null = null;
       let retries = 0;
-      let shouldRetrySpan = false;
 
       while (retries <= 1) {
         try {
-          node = await processChunk(deps, chunk, customInstructions, signal, usages);
-          if (node) {
-            chunkNodes.push(node);
+          pendingNode = await prepareChunk(deps, chunk, customInstructions, signal, usages);
+          if (pendingNode) {
+            pendingNodes.push(pendingNode);
             break;
           }
         } catch (error) {
@@ -374,20 +406,24 @@ export async function compactSpan(
             // First retry: retry the same chunk
             retries++;
             continue;
-          } else if (retries === 1 && !shouldRetrySpan) {
+          } else if (retries === 1 && !spanRetryUsed) {
             // Second failure: retry the entire span as one chunk
-            shouldRetrySpan = true;
+            spanRetryUsed = true;
             retries++;
-            // Re-chunk as one chunk
+            
+            // Clear all pending nodes - we'll replace them with the span node
+            pendingNodes.length = 0;
+            
+            // Re-chunk as one chunk covering all messages
             const allMessagesChunk = {
-              messages: [...messages],
+              messages: [...normalizedMessages],
               oversized: false,
-              tokenCount: messages.reduce((sum, m) => sum + m.tokenCount, 0),
+              tokenCount: normalizedMessages.reduce((sum, m) => sum + m.tokenCount, 0),
             };
             try {
-              node = await processChunk(deps, allMessagesChunk, customInstructions, signal, usages);
-              if (node) {
-                chunkNodes.push(node);
+              pendingNode = await prepareChunk(deps, allMessagesChunk, customInstructions, signal, usages);
+              if (pendingNode) {
+                pendingNodes.push(pendingNode);
                 break;
               }
             } catch {
@@ -401,9 +437,16 @@ export async function compactSpan(
         }
       }
 
-      if (node === null) {
+      if (pendingNode === null) {
         return undefined;
       }
+    }
+
+    // Insert all pending nodes now that we know all chunks succeeded
+    const chunkNodes: SummaryNode[] = [];
+    for (const pendingNode of pendingNodes) {
+      const node = insertPendingNode(db, projectId, pendingNode);
+      chunkNodes.push(node);
     }
 
     // 5. Condense

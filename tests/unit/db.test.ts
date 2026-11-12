@@ -191,4 +191,105 @@ describe("schema", () => {
     
     db.close();
   });
+
+  it("rejects duplicate (session_id, entry_id) on fresh database", async () => {
+    const db = await openDatabase(":memory:");
+    migrate(db);
+    
+    db.prepare("INSERT INTO projects (id, root) VALUES (?, ?)").run("p1", "/tmp/p1");
+    db.prepare("INSERT INTO sessions (id, project_id, cwd) VALUES (?, ?, ?)").run("s1", "p1", "/tmp/p1");
+    
+    // Insert first message
+    db.prepare(
+      "INSERT INTO messages (project_id, session_id, entry_id, seq, role, content, token_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run("p1", "s1", "e1", 1, "user", "hello", 5, new Date().toISOString());
+    
+    // Try to insert duplicate (session_id, entry_id) - should fail
+    expect(() => {
+      db.prepare(
+        "INSERT INTO messages (project_id, session_id, entry_id, seq, role, content, token_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("p1", "s1", "e1", 2, "assistant", "world", 5, new Date().toISOString());
+    }).toThrow();
+    
+    db.close();
+  });
+
+  it("rejects duplicate (session_id, entry_id) on upgraded v1 database", async () => {
+    const db = await openDatabase(":memory:");
+    
+    // Create a v1 database manually (without event_at column and with non-unique index)
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+      INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+    `);
+    
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS projects (
+        id TEXT PRIMARY KEY,
+        root TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        session_file TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (project_id) REFERENCES projects(id)
+      );
+    `);
+    
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        entry_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('user','assistant','toolResult','custom','bashExecution')),
+        content TEXT NOT NULL,
+        token_count INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (project_id) REFERENCES projects(id),
+        FOREIGN KEY (session_id) REFERENCES sessions(id)
+      );
+    `);
+    
+    // Create the non-unique index (as migration 1 does)
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_messages_session_entry ON messages(session_id, entry_id);
+    `);
+    
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_messages_session_seq ON messages(session_id, seq);
+    `);
+    
+    // Insert a project and session
+    db.prepare("INSERT INTO projects (id, root) VALUES (?, ?)").run("p1", "/tmp/p1");
+    db.prepare("INSERT INTO sessions (id, project_id, cwd) VALUES (?, ?, ?)").run("s1", "p1", "/tmp/p1");
+    
+    // Insert first message
+    db.prepare(
+      "INSERT INTO messages (project_id, session_id, entry_id, seq, role, content, token_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run("p1", "s1", "e1", 1, "user", "hello", 5, new Date().toISOString());
+    
+    // Run migration to v2
+    migrate(db);
+    
+    // Try to insert duplicate (session_id, entry_id) - should fail due to unique index
+    expect(() => {
+      db.prepare(
+        "INSERT INTO messages (project_id, session_id, entry_id, seq, role, content, token_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("p1", "s1", "e1", 2, "assistant", "world", 5, new Date().toISOString());
+    }).toThrow();
+    
+    db.close();
+  });
 });

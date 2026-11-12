@@ -211,11 +211,10 @@ function runMigration2(db: Db): void {
     db.exec(`ALTER TABLE messages ADD COLUMN event_at TEXT;`);
   }
 
-  // Create unique index if it doesn't exist
-  db.exec(`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_entry 
-    ON messages(session_id, entry_id)
-  `);
+  // Drop the non-unique index if it exists (from migration 1)
+  // and create a unique index with the same name
+  db.exec(`DROP INDEX IF EXISTS idx_messages_session_entry;`);
+  db.exec(`CREATE UNIQUE INDEX idx_messages_session_entry ON messages(session_id, entry_id);`);
 
   // Update schema version
   db.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2')");

@@ -1,0 +1,236 @@
+import type { Db } from "../db/driver.js";
+import type { LcmConfig, Memory, SearchHit, SummaryNode } from "../types.js";
+import { recentMemories } from "../store/memories.js";
+import { searchAll } from "./search.js";
+import { estimateTokens } from "../util/tokens.js";
+
+export interface RecallState {
+  surfaced: Set<string>;
+  restored: boolean;
+}
+
+export function createRecallState(): RecallState {
+  return {
+    surfaced: new Set<string>(),
+    restored: false,
+  };
+}
+
+/**
+ * Get the newest summaries from other sessions (not the current sessionId).
+ * Limited to 5, ordered by created_at DESC.
+ */
+function getNewestOtherSessionSummaries(
+  db: Db,
+  projectId: string,
+  sessionId: string,
+  limit: number = 5
+): SummaryNode[] {
+  const rows = db
+    .prepare(
+      `SELECT id, project_id, session_id, depth, kind, content, token_count,
+              start_seq, end_seq, message_count, created_at, earliest_at, latest_at
+       FROM summaries
+       WHERE project_id = ? AND session_id != ?
+       ORDER BY created_at DESC
+       LIMIT ?`
+    )
+    .all<{
+      id: string;
+      project_id: string;
+      session_id: string;
+      depth: number;
+      kind: string;
+      content: string;
+      token_count: number;
+      start_seq: number | null;
+      end_seq: number | null;
+      message_count: number;
+      created_at: string;
+      earliest_at: string | null;
+      latest_at: string | null;
+    }>(projectId, sessionId, limit);
+
+  return rows.map((row) => ({
+    id: row.id,
+    projectId: row.project_id,
+    sessionId: row.session_id,
+    depth: row.depth,
+    kind: row.kind as "leaf" | "condensed" | "legacy" | "oversized",
+    content: row.content,
+    tokenCount: row.token_count,
+    startSeq: row.start_seq,
+    endSeq: row.end_seq,
+    messageCount: row.message_count,
+    createdAt: row.created_at,
+    earliestAt: row.earliest_at,
+    latestAt: row.latest_at,
+    parentIds: [],
+    childIds: [],
+  }));
+}
+
+/**
+ * Format a memory for display in the restore block.
+ */
+function formatMemory(memory: Memory): string {
+  const tagsStr = memory.tags.length > 0 ? ` (${memory.tags.join(", ")})` : "";
+  return `- [${memory.id}] ${memory.content}${tagsStr}`;
+}
+
+/**
+ * Format a summary for display in the restore block.
+ */
+function formatSummary(summary: SummaryNode): string {
+  return `- [${summary.id}] ${summary.content}`;
+}
+
+/**
+ * Build the restore block with project memories and recent session summaries.
+ * Returns null when state.restored is true or when both lists are empty.
+ */
+export function buildRestoreBlock(
+  db: Db,
+  projectId: string,
+  sessionId: string,
+  config: LcmConfig,
+  state: RecallState
+): string | null {
+  // Return null if already restored
+  if (state.restored) {
+    return null;
+  }
+
+  // Mark as restored
+  state.restored = true;
+
+  // Load recent memories
+  const memories = recentMemories(db, projectId, config.restoreMemories);
+
+  // Load newest summaries from other sessions
+  const summaries = getNewestOtherSessionSummaries(db, projectId, sessionId, 5);
+
+  // Check if both lists are empty
+  if (memories.length === 0 && summaries.length === 0) {
+    return null;
+  }
+
+  // Build the block
+  const lines: string[] = ["<memory-context>"];
+
+  // Add project memories section
+  if (memories.length > 0) {
+    lines.push("## Project memories");
+    for (const memory of memories) {
+      lines.push(formatMemory(memory));
+      state.surfaced.add(memory.id);
+    }
+  }
+
+  // Add recent sessions section
+  if (summaries.length > 0) {
+    lines.push("## Recent sessions");
+    for (const summary of summaries) {
+      lines.push(formatSummary(summary));
+      state.surfaced.add(summary.id);
+    }
+  }
+
+  // Add surfaced memory ids comment
+  const surfacedIds = Array.from(state.surfaced).join(",");
+  lines.push(`<!-- surfaced-memory-ids: ${surfacedIds} -->`);
+  lines.push("</memory-context>");
+
+  return lines.join("\n");
+}
+
+/**
+ * Fetch the full content for a hit (memory or summary).
+ */
+function getHitContent(db: Db, hit: SearchHit): string {
+  if (hit.type === "memory") {
+    const row = db
+      .prepare("SELECT content FROM memories WHERE id = ?")
+      .get<{ content: string }>(hit.id);
+    return row?.content ?? hit.snippet ?? "";
+  } else if (hit.type === "summary") {
+    const row = db
+      .prepare("SELECT content FROM summaries WHERE id = ?")
+      .get<{ content: string }>(hit.id);
+    return row?.content ?? hit.snippet ?? "";
+  }
+  return hit.snippet ?? "";
+}
+
+/**
+ * Build the prompt block with relevant memories and summaries matching the prompt.
+ * Returns null for empty prompt or when nothing qualifies.
+ */
+export function buildPromptBlock(
+  db: Db,
+  projectId: string,
+  sessionId: string,
+  prompt: string,
+  config: LcmConfig,
+  state: RecallState
+): string | null {
+  // Return null for empty prompt
+  if (prompt.trim().length === 0) {
+    return null;
+  }
+
+  // Search for relevant items
+  const hits = searchAll(db, projectId, prompt, {
+    limit: config.recallLimit * 2,
+    types: ["memory", "summary"],
+  });
+
+  // Filter by score threshold and exclude already surfaced ids
+  const filtered = hits.filter(
+    (hit) =>
+      hit.score >= config.recallThreshold &&
+      !state.surfaced.has(hit.id)
+  );
+
+  // Take up to recallLimit items
+  const selected = filtered.slice(0, config.recallLimit);
+
+  // Check if we have anything to include
+  if (selected.length === 0) {
+    return null;
+  }
+
+  // Build the block content and track token count
+  const lines: string[] = ["<memory-context>"];
+  lines.push("## Relevant memory");
+
+  let totalTokens = 0;
+  const MAX_TOKENS = 2000;
+
+  for (const hit of selected) {
+    const content = getHitContent(db, hit);
+    const tokenCount = estimateTokens(content);
+
+    // Check if adding this would exceed the token limit
+    if (totalTokens + tokenCount > MAX_TOKENS) {
+      break;
+    }
+
+    lines.push(`- [${hit.id}] ${content}`);
+
+    state.surfaced.add(hit.id);
+    totalTokens += tokenCount;
+  }
+
+  // If we didn't add any items (due to token limit), return null
+  if (lines.length === 2) {
+    return null;
+  }
+
+  // Add surfaced memory ids comment
+  const newSurfacedIds = Array.from(state.surfaced).join(",");
+  lines.push(`<!-- surfaced-memory-ids: ${newSurfacedIds} -->`);
+  lines.push("</memory-context>");
+
+  return lines.join("\n");
+}

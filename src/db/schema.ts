@@ -65,8 +65,10 @@ function runMigration1(db: Db): void {
       content TEXT NOT NULL,
       token_count INTEGER NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      event_at TEXT,
       FOREIGN KEY (project_id) REFERENCES projects(id),
-      FOREIGN KEY (session_id) REFERENCES sessions(id)
+      FOREIGN KEY (session_id) REFERENCES sessions(id),
+      UNIQUE(session_id, entry_id)
     );
 
     -- Summaries table

@@ -1,0 +1,4 @@
+node_modules/
+.pi/lcm/
+coverage/
+*.log

@@ -1,0 +1,29 @@
+{
+  "name": "pi-lcm",
+  "version": "0.1.0",
+  "description": "Lossless context and memory for Pi",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["pi-package", "pi-extension", "memory", "compaction"],
+  "pi": { "extensions": ["./src/index.ts"] },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@types/node": "^22.0.0",
+    "typebox": "latest",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

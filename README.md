@@ -1,0 +1,1 @@
+The `pi-lcm` extension provides lossless context and memory management for Pi, enabling durable memories, compaction via DAG summaries, and efficient retrieval.

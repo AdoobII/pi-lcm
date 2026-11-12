@@ -1,6 +1,6 @@
 import type { Db } from "./driver.js";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export class SchemaTooNewError extends Error {
   constructor(public readonly current: number, public readonly expected: number) {
@@ -222,6 +222,27 @@ function runMigration2(db: Db): void {
   db.exec(`COMMIT;`);
 }
 
+function runMigration3(db: Db): void {
+  db.exec(`BEGIN TRANSACTION;`);
+
+  // Add content_hash column to memories table if it doesn't exist
+  const columns = db
+    .prepare("PRAGMA table_info(memories)")
+    .all<{ name: string }>();
+  const hasContentHash = columns.some((col) => col.name === "content_hash");
+
+  if (!hasContentHash) {
+    db.exec(`ALTER TABLE memories ADD COLUMN content_hash TEXT;`);
+    // Add a unique index on (project_id, content_hash) for deduplication
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_project_content_hash ON memories(project_id, content_hash)`);
+  }
+
+  // Update schema version
+  db.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '3')");
+
+  db.exec(`COMMIT;`);
+}
+
 /**
  * Run migrations on the database. Idempotent and synchronous.
  * Throws SchemaTooNewError if the stored version is newer than SCHEMA_VERSION.
@@ -251,6 +272,9 @@ export function migrate(db: Db): void {
     }
     if (currentVersion === null || currentVersion < 2) {
       runMigration2(db);
+    }
+    if (currentVersion === null || currentVersion < 3) {
+      runMigration3(db);
     }
   }
 }

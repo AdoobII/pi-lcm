@@ -1,5 +1,5 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import type { MessageInput } from "../types.js";
+import type { MessageInput, MessageRole } from "../types.js";
 
 const MAX_CONTENT_LENGTH = 100_000;
 
@@ -132,7 +132,7 @@ export function entryToMessage(
 
   return {
     entryId: entry.id,
-    role: role as any, // role is validated by the schema
+    role: role as MessageRole,
     content,
     createdAt: entryTimestamp,
     eventAt,

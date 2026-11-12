@@ -1,6 +1,6 @@
 import type { Db } from "./driver.js";
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export class SchemaTooNewError extends Error {
   constructor(public readonly current: number, public readonly expected: number) {
@@ -65,10 +65,8 @@ function runMigration1(db: Db): void {
       content TEXT NOT NULL,
       token_count INTEGER NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      event_at TEXT,
       FOREIGN KEY (project_id) REFERENCES projects(id),
-      FOREIGN KEY (session_id) REFERENCES sessions(id),
-      UNIQUE(session_id, entry_id)
+      FOREIGN KEY (session_id) REFERENCES sessions(id)
     );
 
     -- Summaries table
@@ -123,6 +121,7 @@ function runMigration1(db: Db): void {
 
     -- Indexes
     CREATE INDEX IF NOT EXISTS idx_messages_session_seq ON messages(session_id, seq);
+    CREATE INDEX IF NOT EXISTS idx_messages_session_entry ON messages(session_id, entry_id);
     CREATE INDEX IF NOT EXISTS idx_summaries_session_depth ON summaries(session_id, depth);
     CREATE INDEX IF NOT EXISTS idx_summary_messages_message_id ON summary_messages(message_id);
     CREATE INDEX IF NOT EXISTS idx_summary_parents_parent_id ON summary_parents(parent_id);
@@ -199,6 +198,31 @@ function runMigration1(db: Db): void {
   `);
 }
 
+function runMigration2(db: Db): void {
+  db.exec(`BEGIN TRANSACTION;`);
+
+  // Check if event_at column exists and add it if not
+  const columns = db
+    .prepare("PRAGMA table_info(messages)")
+    .all<{ name: string }>();
+  const hasEventAt = columns.some((col) => col.name === "event_at");
+
+  if (!hasEventAt) {
+    db.exec(`ALTER TABLE messages ADD COLUMN event_at TEXT;`);
+  }
+
+  // Create unique index if it doesn't exist
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_entry 
+    ON messages(session_id, entry_id)
+  `);
+
+  // Update schema version
+  db.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2')");
+
+  db.exec(`COMMIT;`);
+}
+
 /**
  * Run migrations on the database. Idempotent and synchronous.
  * Throws SchemaTooNewError if the stored version is newer than SCHEMA_VERSION.
@@ -222,6 +246,12 @@ export function migrate(db: Db): void {
   }
 
   if (currentVersion === null || currentVersion < SCHEMA_VERSION) {
-    runMigration1(db);
+    // Run all migrations from current version + 1 up to SCHEMA_VERSION
+    if (currentVersion === null || currentVersion < 1) {
+      runMigration1(db);
+    }
+    if (currentVersion === null || currentVersion < 2) {
+      runMigration2(db);
+    }
   }
 }

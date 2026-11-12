@@ -109,3 +109,11 @@ export interface SummarizeResult {
 }
 
 export type Summarizer = (text: string, opts: SummarizeOptions) => Promise<SummarizeResult>;
+
+export interface DbPathOptions {
+  cwd: string;
+  projectRoot: string;
+  projectId: string;
+  config: LcmConfig;
+  trusted: boolean;
+}

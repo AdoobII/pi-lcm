@@ -200,37 +200,99 @@ export function buildPromptBlock(
     return null;
   }
 
-  // Build the block content and track token count
-  const lines: string[] = ["<memory-context>"];
-  lines.push("## Relevant memory");
-
-  let totalTokens = 0;
   const MAX_TOKENS = 2000;
 
+  // Build the block incrementally, counting the full text that will be emitted
+  // We need to include: envelope, each full line, the comment, and the closing tag
+  const openingLines = ["<memory-context>", "## Relevant memory"];
+  const openingText = openingLines.join("\n");
+  const openingTokens = estimateTokens(openingText);
+
+  // Track items we can include and their full line text
+  const items: { id: string; line: string; lineTokens: number }[] = [];
+  
   for (const hit of selected) {
     const content = getHitContent(db, hit);
-    const tokenCount = estimateTokens(content);
+    const line = `- [${hit.id}] ${content}`;
+    const lineTokens = estimateTokens(line);
+    items.push({ id: hit.id, line, lineTokens });
+  }
 
-    // Check if adding this would exceed the token limit
-    if (totalTokens + tokenCount > MAX_TOKENS) {
+  // Now try to build the block, checking the full token count including closing parts
+  // We'll add items one by one and check if the complete block (with closing) fits
+  const includedIds: string[] = [];
+  const includedLines: string[] = [...openingLines];
+  let currentTokens = openingTokens;
+
+  for (const item of items) {
+    // Calculate what the closing parts would look like if we include this item
+    const tempSurfaced = new Set(state.surfaced);
+    tempSurfaced.add(item.id);
+    for (const id of includedIds) {
+      tempSurfaced.add(id);
+    }
+    const surfacedIdsStr = Array.from(tempSurfaced).join(",");
+    const closingComment = `<!-- surfaced-memory-ids: ${surfacedIdsStr} -->`;
+    const closingText = [closingComment, "</memory-context>"].join("\n");
+    const closingTokens = estimateTokens(closingText);
+
+    // Calculate the new line with newline
+    const newLineWithNewline = includedLines.length > 0 ? "\n" + item.line : item.line;
+    const newLineTokens = estimateTokens(newLineWithNewline);
+
+    // Total would be: current + new line + closing
+    const totalWithThis = currentTokens + newLineTokens + closingTokens;
+
+    if (totalWithThis > MAX_TOKENS) {
+      // Can't include this item
       break;
     }
 
-    lines.push(`- [${hit.id}] ${content}`);
-
-    state.surfaced.add(hit.id);
-    totalTokens += tokenCount;
+    includedLines.push(item.line);
+    includedIds.push(item.id);
+    currentTokens += newLineTokens;
   }
 
-  // If we didn't add any items (due to token limit), return null
-  if (lines.length === 2) {
+  // If we didn't include any items, return null
+  if (includedIds.length === 0) {
     return null;
   }
 
-  // Add surfaced memory ids comment
-  const newSurfacedIds = Array.from(state.surfaced).join(",");
-  lines.push(`<!-- surfaced-memory-ids: ${newSurfacedIds} -->`);
-  lines.push("</memory-context>");
+  // Add all included ids to state.surfaced
+  for (const id of includedIds) {
+    state.surfaced.add(id);
+  }
 
-  return lines.join("\n");
+  // Build the final block with closing parts
+  const allSurfacedIds = Array.from(state.surfaced).join(",");
+  const closingComment = `<!-- surfaced-memory-ids: ${allSurfacedIds} -->`;
+  const finalLines = [...includedLines, closingComment, "</memory-context>"];
+  const finalBlock = finalLines.join("\n");
+
+  // Final validation: ensure the complete block is within the token limit
+  const finalTokenCount = estimateTokens(finalBlock);
+  if (finalTokenCount > MAX_TOKENS) {
+    // Remove items from the end until it fits or we have none
+    while (includedIds.length > 0) {
+      const removedId = includedIds.pop()!;
+      includedLines.pop();
+      state.surfaced.delete(removedId);
+
+      const updatedSurfacedIds = Array.from(state.surfaced).join(",");
+      const updatedClosingComment = `<!-- surfaced-memory-ids: ${updatedSurfacedIds} -->`;
+      const updatedFinalLines = [...includedLines, updatedClosingComment, "</memory-context>"];
+      const updatedFinalBlock = updatedFinalLines.join("\n");
+      const updatedTokenCount = estimateTokens(updatedFinalBlock);
+
+      if (updatedTokenCount <= MAX_TOKENS || includedIds.length === 0) {
+        if (includedIds.length === 0) {
+          return null;
+        }
+        return updatedFinalBlock;
+      }
+    }
+    return null;
+  }
+
+  return finalBlock;
 }

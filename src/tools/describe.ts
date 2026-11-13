@@ -2,8 +2,6 @@ import { Type, Static } from "typebox";
 import type { ToolDeps } from "./index.js";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { getSummary } from "../store/summaries.js";
-import { countMessages } from "../store/messages.js";
-import { countSummaries } from "../store/summaries.js";
 
 const params = Type.Object({
   id: Type.String({ description: "Summary ID (starting with sum_) or session ID" }),
@@ -53,8 +51,12 @@ export function lcmDescribe(pi: ExtensionAPI, deps: ToolDeps): void {
         };
       } else {
         // Describe a session
-        const messageCount = countMessages(db, projectId);
-        const summaryCount = countSummaries(db, projectId);
+        const messageCount = db
+          .prepare("SELECT COUNT(*) as count FROM messages WHERE project_id = ? AND session_id = ?")
+          .get<{ count: number }>(projectId, p.id);
+        const summaryCount = db
+          .prepare("SELECT COUNT(*) as count FROM summaries WHERE project_id = ? AND session_id = ?")
+          .get<{ count: number }>(projectId, p.id);
         
         // Get session cwd from sessions table
         const sessionRow = db
@@ -72,8 +74,8 @@ export function lcmDescribe(pi: ExtensionAPI, deps: ToolDeps): void {
           `Session ${p.id}`,
           `  cwd: ${sessionRow.cwd}`,
           `  created_at: ${sessionRow.created_at}`,
-          `  message count: ${messageCount}`,
-          `  summary count: ${summaryCount}`,
+          `  message count: ${messageCount?.count ?? 0}`,
+          `  summary count: ${summaryCount?.count ?? 0}`,
         ];
         
         return {

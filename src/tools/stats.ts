@@ -33,10 +33,8 @@ export function lcmStats(pi: ExtensionAPI, deps: ToolDeps): void {
       // Get sum of token_count for distinct messages covered by summary_messages
       const coveredMessagesSum = db
         .prepare(`
-          SELECT SUM(m.token_count) as total 
-          FROM messages m
-          JOIN summary_messages sm ON m.id = sm.message_id
-          WHERE m.project_id = ?
+          SELECT SUM(token_count) as total 
+          FROM (SELECT DISTINCT m.id, m.token_count FROM messages m JOIN summary_messages sm ON m.id = sm.message_id WHERE m.project_id = ?)
         `)
         .get<{ total: number | null }>(projectId);
       

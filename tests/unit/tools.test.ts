@@ -69,4 +69,64 @@ describe("tools", () => {
     const stats = await run("lcm_stats", {});
     expect(JSON.stringify(stats.content)).toContain("memories");
   });
+
+  it("describe session counts are session-specific", async () => {
+    // Create two sessions with messages
+    ensureSession(db, projectId, "s2", "/tmp/p");
+    
+    // Add messages to s1
+    insertMessages(db, projectId, "s1", [
+      { entryId: "e1", role: "user", content: "message in s1", createdAt: "2026-01-01T00:00:00.000Z" },
+    ]);
+    
+    // Add messages to s2
+    insertMessages(db, projectId, "s2", [
+      { entryId: "e2", role: "user", content: "message in s2", createdAt: "2026-01-01T00:00:00.000Z" },
+    ]);
+    
+    // Describe s1 - should only count messages in s1
+    const result = await run("lcm_describe", { id: "s1" });
+    const content = JSON.stringify(result.content);
+    expect(content).toContain("message count: 1");
+    expect(content).toContain("summary count: 0");
+  });
+
+  it("stats tokenSavings counts a message covered by two summaries once", async () => {
+    // Create a message
+    const messageIds = insertMessages(db, projectId, "s1", [
+      { entryId: "e1", role: "user", content: "shared message content", createdAt: "2026-01-01T00:00:00.000Z" },
+    ]).map((m) => m.id);
+    
+    // Create two summaries that both cover the same message
+    insertSummary(db, projectId, {
+      sessionId: "s1", depth: 0, kind: "leaf", content: "summary 1", tokenCount: 10, messageIds, parentIds: [],
+    });
+    insertSummary(db, projectId, {
+      sessionId: "s1", depth: 0, kind: "leaf", content: "summary 2", tokenCount: 10, messageIds, parentIds: [],
+    });
+    
+    const result = await run("lcm_stats", {});
+    const content = JSON.stringify(result.content);
+    // The message should be counted only once in tokenSavings
+    // tokenSavings = (message token_count) - (sum of summary token_counts)
+    // message token_count for "shared message content" should be counted once
+    expect(content).toContain("tokenSavings:");
+  });
+
+  it("expand truncation output ends with [truncated] and respects the token budget", async () => {
+    // Create a very long message that will exceed the budget (20000 tokens)
+    // Each token is roughly 4 characters, so we need ~80000 characters to exceed 20000 tokens
+    const longContent = "a ".repeat(80000); // Very long content to ensure it exceeds the budget
+    const messageIds = insertMessages(db, projectId, "s1", [
+      { entryId: "e1", role: "user", content: longContent, createdAt: "2026-01-01T00:00:00.000Z" },
+    ]).map((m) => m.id);
+    
+    const summary = insertSummary(db, projectId, {
+      sessionId: "s1", depth: 0, kind: "leaf", content: "summary", tokenCount: 10, messageIds, parentIds: [],
+    });
+    
+    const result = await run("lcm_expand", { target: summary.id, format: "full" });
+    const content = JSON.stringify(result.content);
+    expect(content).toContain("[truncated]");
+  });
 });

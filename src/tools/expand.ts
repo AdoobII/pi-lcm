@@ -30,8 +30,10 @@ function formatFullMessages(messages: Array<{ role: string; content: string }>, 
   for (const msg of messages) {
     const contentTokens = estimateTokens(`[${msg.role}] ${msg.content}`);
     if (totalTokens + contentTokens > budget) {
-      parts.push(`[${msg.role}] ${msg.content.slice(0, 200)}...[truncated]`);
-      totalTokens += contentTokens;
+      const truncatedText = `[${msg.role}] ${msg.content.slice(0, 200)}...[truncated]`;
+      const truncatedTokens = estimateTokens(truncatedText);
+      parts.push(truncatedText);
+      totalTokens += truncatedTokens;
       break;
     }
     parts.push(`[${msg.role}] ${msg.content}`);

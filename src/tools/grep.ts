@@ -6,6 +6,10 @@ import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-age
 import { searchAll } from "../recall/search.js";
 import type { SearchType, SearchHit } from "../types.js";
 
+// FTS snippet delimiters - must match those in src/recall/search.ts
+const SNIPPET_START = "\u0001";
+const SNIPPET_END = "\u0002";
+
 const params = Type.Object({
   query: Type.String({ description: "Search query" }),
   limit: Type.Optional(Type.Number({ description: "Maximum number of results", default: 10 })),
@@ -32,10 +36,10 @@ function formatHit(hit: SearchHit): string {
   const scoreStr = hit.score.toFixed(2);
   const typeLabel = hit.type;
   
-  // Clean up the snippet by removing the highlight markers
+  // Clean up the snippet by removing the FTS highlight markers
   let snippet = hit.snippet;
-  // Remove the [...] highlight markers from FTS
-  snippet = snippet.replace(/\[/g, "").replace(/\]/g, "");
+  // Remove the control character delimiters used by FTS snippet
+  snippet = snippet.replace(new RegExp(SNIPPET_START, "g"), "").replace(new RegExp(SNIPPET_END, "g"), "");
   
   const indentedSnippet = snippet.split("\n").map(line => `  ${line}`).join("\n");
   return `[${typeLabel}] ${hit.id} (score ${scoreStr}, ${date})\n${indentedSnippet}`;

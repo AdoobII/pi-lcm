@@ -2,6 +2,8 @@ import type { Db } from "../db/driver.js";
 import { estimateTokens } from "../util/tokens.js";
 import type { MessageInput, StoredMessage } from "../types.js";
 
+const MESSAGE_COLUMNS = "id, project_id, session_id, entry_id, seq, role, content, token_count, created_at, event_at";
+
 export function getMaxSeq(db: Db, sessionId: string): number {
   const row = db
     .prepare("SELECT MAX(seq) as maxSeq FROM messages WHERE session_id = ?")
@@ -15,6 +17,10 @@ export function insertMessages(
   sessionId: string,
   inputs: MessageInput[],
 ): StoredMessage[] {
+  if (inputs.length === 0) {
+    return [];
+  }
+  
   // Start transaction
   db.exec("BEGIN TRANSACTION");
 
@@ -56,15 +62,10 @@ export function insertMessages(
 
     // Get all rows for the requested entry IDs ordered by seq
     const allEntryIds = inputs.map((input) => input.entryId);
-    if (allEntryIds.length === 0) {
-      db.exec("COMMIT");
-      return [];
-    }
-
     const placeholders = allEntryIds.map(() => "?").join(", ");
     const result = db
       .prepare(
-        `SELECT id, project_id, session_id, entry_id, seq, role, content, token_count, created_at, event_at 
+        `SELECT ${MESSAGE_COLUMNS} 
          FROM messages 
          WHERE session_id = ? AND entry_id IN (${placeholders}) 
          ORDER BY seq`
@@ -91,7 +92,7 @@ export function getMessagesByEntryIds(
   const placeholders = entryIds.map(() => "?").join(", ");
   return db
     .prepare(
-      `SELECT id, project_id, session_id, entry_id, seq, role, content, token_count, created_at, event_at 
+      `SELECT ${MESSAGE_COLUMNS} 
        FROM messages 
        WHERE session_id = ? AND entry_id IN (${placeholders}) 
        ORDER BY seq`
@@ -107,7 +108,7 @@ export function getMessagesBySeqRange(
 ): StoredMessage[] {
   return db
     .prepare(
-      `SELECT id, project_id, session_id, entry_id, seq, role, content, token_count, created_at, event_at 
+      `SELECT ${MESSAGE_COLUMNS} 
        FROM messages 
        WHERE session_id = ? AND seq >= ? AND seq < ? 
        ORDER BY seq`
@@ -121,7 +122,7 @@ export function getMessagesForSummary(
 ): StoredMessage[] {
   return db
     .prepare(
-      `SELECT m.id, m.project_id, m.session_id, m.entry_id, m.seq, m.role, m.content, m.token_count, m.created_at, m.event_at 
+      `SELECT m.${MESSAGE_COLUMNS} 
        FROM messages m 
        JOIN summary_messages sm ON m.id = sm.message_id 
        WHERE sm.summary_id = ? 

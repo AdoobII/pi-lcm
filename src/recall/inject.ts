@@ -4,6 +4,10 @@ import { recentMemories } from "../store/memories.js";
 import { searchAll } from "./search.js";
 import { estimateTokens } from "../util/tokens.js";
 
+// FTS snippet delimiters - must match those in src/recall/search.ts
+const SNIPPET_START = "\u0001";
+const SNIPPET_END = "\u0002";
+
 export interface RecallState {
   surfaced: Set<string>;
   restored: boolean;
@@ -146,20 +150,28 @@ export function buildRestoreBlock(
 
 /**
  * Fetch the full content for a hit (memory or summary).
+ * Strips FTS snippet delimiters from fallback snippet content.
  */
 function getHitContent(db: Db, hit: SearchHit): string {
   if (hit.type === "memory") {
     const row = db
       .prepare("SELECT content FROM memories WHERE id = ?")
       .get<{ content: string }>(hit.id);
-    return row?.content ?? hit.snippet ?? "";
+    if (row?.content) {
+      return row.content;
+    }
   } else if (hit.type === "summary") {
     const row = db
       .prepare("SELECT content FROM summaries WHERE id = ?")
       .get<{ content: string }>(hit.id);
-    return row?.content ?? hit.snippet ?? "";
+    if (row?.content) {
+      return row.content;
+    }
   }
-  return hit.snippet ?? "";
+  // Fallback to snippet, stripping FTS delimiters
+  return hit.snippet
+    .replace(new RegExp(SNIPPET_START, "g"), "")
+    .replace(new RegExp(SNIPPET_END, "g"), "") ?? "";
 }
 
 /**

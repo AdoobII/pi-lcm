@@ -53,9 +53,6 @@ function truncateContent(content: string, maxTokens: number, minTokens: number):
   // We need to truncate the content to approximately targetTokens using the same metric
   // estimateTokens uses Math.ceil(text.length / 4), so we work backwards
   const targetLength = Math.floor(targetTokens * 4);
-  if (content.length <= targetLength) {
-    return content;
-  }
   return content.slice(0, targetLength);
 }
 

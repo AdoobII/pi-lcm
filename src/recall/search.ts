@@ -8,6 +8,38 @@ const TYPE_WEIGHTS: Record<SearchType, number> = {
   message: 0.8,
 };
 
+// FTS snippet delimiters - use unlikely control characters
+const SNIPPET_START = "\u0001";
+const SNIPPET_END = "\u0002";
+
+/**
+ * Build the SELECT clause for FTS queries.
+ * Handles the common pattern of bm25 and snippet with table-specific columns.
+ */
+function buildFtsSelect(
+  tableAlias: string,
+  ftsTable: string,
+  hasSessionId: boolean,
+  hasDepth: boolean
+): string {
+  const parts: string[] = [
+    `${tableAlias}.id`,
+    `${tableAlias}.created_at as createdAt`,
+    `bm25(${ftsTable}) as bm25_rank`,
+    `snippet(${ftsTable}, 0, '${SNIPPET_START}', '${SNIPPET_END}', '…', 12) as snippet`,
+  ];
+  
+  if (hasSessionId) {
+    parts.unshift(`${tableAlias}.session_id as sessionId`);
+  }
+  
+  if (hasDepth) {
+    parts.unshift(`${tableAlias}.depth`);
+  }
+  
+  return parts.join(", ");
+}
+
 interface RawHit {
   type: SearchType;
   id: string;
@@ -50,11 +82,12 @@ function queryTable(
     : `${ftsTable}.rowid = ${tableAlias}.rowid`;
 
   // Select appropriate columns based on table
-  const selectCols = isMessages
-    ? `${tableAlias}.id, ${tableAlias}.session_id as sessionId, ${tableAlias}.created_at as createdAt, bm25(${ftsTable}) as bm25_rank, snippet(${ftsTable}, 0, '[', ']', '…', 12) as snippet`
-    : type === "summary"
-      ? `${tableAlias}.id, ${tableAlias}.session_id as sessionId, ${tableAlias}.depth, ${tableAlias}.created_at as createdAt, bm25(${ftsTable}) as bm25_rank, snippet(${ftsTable}, 0, '[', ']', '…', 12) as snippet`
-      : `${tableAlias}.id, ${tableAlias}.created_at as createdAt, bm25(${ftsTable}) as bm25_rank, snippet(${ftsTable}, 0, '[', ']', '…', 12) as snippet`;
+  const selectCols = buildFtsSelect(
+    tableAlias,
+    ftsTable,
+    type !== "memory",
+    type === "summary"
+  );
 
   const query = `
     SELECT ${selectCols}

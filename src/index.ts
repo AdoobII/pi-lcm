@@ -338,6 +338,10 @@ async function handleSessionStart(event: { type: string; reason: string }, ctx: 
     const model = resolveModel(ctx, state.config);
     state.model = model;
     
+    if (choice && !model) {
+      logWarn(`pi-lcm: configured summarizer model ${choice} is unavailable; skipping pi-lcm compaction`);
+    }
+    
     logDebug(`session_start: model=${model?.id ?? "null"}`);
     
     // Warn if no model and no UI
@@ -450,13 +454,8 @@ async function handleSessionBeforeCompact(event: {
       signal: event.signal,
     });
     
-    if (!span) {
+    if (!span || span.messages.length === 0) {
       logDebug("session_before_compact: span cannot be resolved or is empty");
-      return undefined;
-    }
-    
-    if (span.messages.length === 0) {
-      logDebug("session_before_compact: span is empty");
       return undefined;
     }
     
@@ -538,8 +537,8 @@ async function handleSessionCompact(event: {
       const startId = previousFirstKept ?? null;
       const endId = firstKeptEntryId;
       
-      // Collect message entries in this range
-      const messageIds: number[] = [];
+      // Collect message entries in this range, then batch-load their stored ids.
+      const entryIds: string[] = [];
       let inRange = startId === null;
       
       for (const entry of branch) {
@@ -554,15 +553,11 @@ async function handleSessionCompact(event: {
             if (entry.id === endId) {
               break;
             }
-            // Get stored message id
-            const stored = getMessagesByEntryIds(db, sessionId, [entry.id]);
-            const first = stored[0];
-            if (first) {
-              messageIds.push(first.id);
-            }
+            entryIds.push(entry.id);
           }
         }
       }
+      const messageIds = getMessagesByEntryIds(db, sessionId, entryIds).map((m) => m.id);
       
       // Insert legacy node
       const tokenCount = estimateTokens(compactionEntry.summary);

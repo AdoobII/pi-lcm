@@ -169,9 +169,9 @@ function getHitContent(db: Db, hit: SearchHit): string {
     }
   }
   // Fallback to snippet, stripping FTS delimiters
-  return hit.snippet
+  return (hit.snippet ?? "")
     .replace(new RegExp(SNIPPET_START, "g"), "")
-    .replace(new RegExp(SNIPPET_END, "g"), "") ?? "";
+    .replace(new RegExp(SNIPPET_END, "g"), "");
 }
 
 /**

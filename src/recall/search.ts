@@ -111,7 +111,7 @@ function queryTable(
     type,
     id: row.id,
     rank: row.bm25_rank,
-    snippet: row.snippet,
+    snippet: row.snippet ?? "",
     createdAt: row.createdAt,
     sessionId: row.sessionId,
     depth: row.depth,

@@ -37,7 +37,7 @@ function formatHit(hit: SearchHit): string {
   const typeLabel = hit.type;
   
   // Clean up the snippet by removing the FTS highlight markers
-  let snippet = hit.snippet;
+  let snippet = hit.snippet ?? "";
   // Remove the control character delimiters used by FTS snippet
   snippet = snippet.replace(new RegExp(SNIPPET_START, "g"), "").replace(new RegExp(SNIPPET_END, "g"), "");
   

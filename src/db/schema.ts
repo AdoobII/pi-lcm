@@ -1,6 +1,6 @@
 import type { Db } from "./driver.js";
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export class SchemaTooNewError extends Error {
   constructor(public readonly current: number, public readonly expected: number) {
@@ -245,6 +245,22 @@ function runMigration3(db: Db): void {
   db.exec(`COMMIT;`);
 }
 
+function runMigration4(db: Db): void {
+  db.exec(`BEGIN TRANSACTION;`);
+
+  // An external-content FTS5 table needs the old column values to remove a row from the index.
+  db.exec(`
+    DROP TRIGGER IF EXISTS memories_fts_ad;
+    CREATE TRIGGER memories_fts_ad AFTER DELETE ON memories BEGIN
+      INSERT INTO memories_fts(memories_fts, rowid, content, tags) VALUES ('delete', old.rowid, old.content, old.tags);
+    END;
+  `);
+
+  db.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '4')");
+
+  db.exec(`COMMIT;`);
+}
+
 /**
  * Run migrations on the database. Idempotent and synchronous.
  * Throws SchemaTooNewError if the stored version is newer than SCHEMA_VERSION.
@@ -277,6 +293,9 @@ export function migrate(db: Db): void {
     }
     if (currentVersion === null || currentVersion < 3) {
       runMigration3(db);
+    }
+    if (currentVersion === null || currentVersion < 4) {
+      runMigration4(db);
     }
   }
 }

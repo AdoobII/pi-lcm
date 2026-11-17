@@ -215,9 +215,9 @@ describe("schema", () => {
       .all<{ name: string }>();
     expect(indexesAfter).toHaveLength(1);
     
-    // Verify schema version is 3 (migration 3 runs after migration 2)
+    // Verify schema version is current (later migrations run after migration 2)
     const version = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get<{ value: string }>();
-    expect(version?.value).toBe("3");
+    expect(version?.value).toBe(String(SCHEMA_VERSION));
     
     db.close();
   });
@@ -373,9 +373,9 @@ describe("schema", () => {
     // Run migration - should not fail even though event_at already exists
     migrate(db);
     
-    // Verify schema version is 3 (migration 3 runs after migration 2)
+    // Verify schema version is current (later migrations run after migration 2)
     const version = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get<{ value: string }>();
-    expect(version?.value).toBe("3");
+    expect(version?.value).toBe(String(SCHEMA_VERSION));
     
     db.close();
   });
@@ -572,6 +572,29 @@ describe("schema", () => {
       ).run("p1", "s1", "e1", 2, "assistant", "world", 5, new Date().toISOString());
     }).toThrow();
     
+    db.close();
+  });
+
+  it("migration_4_repairs_memories_delete_trigger_on_v3_database", async () => {
+    const db = await openDatabase(":memory:");
+    migrate(db);
+    // Simulate a v3 database whose delete trigger lacks old.content and old.tags.
+    db.exec(`
+      DROP TRIGGER memories_fts_ad;
+      CREATE TRIGGER memories_fts_ad AFTER DELETE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid) VALUES ('delete', old.rowid);
+      END;
+      INSERT INTO projects (id, root) VALUES ('p', '/tmp/p');
+      UPDATE meta SET value = '3' WHERE key = 'schema_version';
+    `);
+    migrate(db);
+    db.exec(`
+      INSERT INTO memories (id, project_id, content, tags, source, created_at, use_count, content_hash)
+      VALUES ('m1', 'p', 'repairable trigger memory', '["t"]', 'auto', 'now', 0, 'h1');
+      DELETE FROM memories WHERE id = 'm1';
+    `);
+    const rows = db.prepare("SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?").all('"repairable"');
+    expect(rows).toHaveLength(0);
     db.close();
   });
 });

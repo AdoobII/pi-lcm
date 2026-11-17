@@ -7,6 +7,7 @@ import { insertMemory } from "../../src/store/memories.js";
 import { insertSummary } from "../../src/store/summaries.js";
 import { buildPromptBlock, createRecallState } from "../../src/recall/inject.js";
 import { ageDays, decayedScore } from "../../src/recall/age.js";
+import { searchAll } from "../../src/recall/search.js";
 import { DEFAULT_CONFIG } from "../../src/config.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -104,11 +105,16 @@ describe("prompt recall age handling", () => {
   });
 
   it("decay_reorders_hits", () => {
-    // The old memory scores higher before decay, and 400 days of age halves that score.
+    // The old memory has the best raw score, and 400 days of age halves it below the fresh one.
     const old = insertMemory(db, projectId, "rollout plan blue green", ["type:finding"], "manual");
     const fresh = insertMemory(db, projectId, "rollout plan blue green with one more word", ["type:finding"], "manual");
     insertMemory(db, projectId, `rollout plan blue green ${"padding ".repeat(12)}`, ["type:finding"], "manual");
     backdateMemory(old.id, 400);
+    // Control: without decay the old memory ranks first.
+    const rawHits = searchAll(db, projectId, "rollout plan blue green", { limit: 10, types: ["memory"] });
+    expect(rawHits[0]?.id).toBe(old.id);
+    expect(rawHits.findIndex((hit) => hit.id === old.id)).toBeLessThan(rawHits.findIndex((hit) => hit.id === fresh.id));
+    // With decay the fresh memory ranks first.
     const block = buildPromptBlock(db, projectId, "s1", "rollout plan blue green", DEFAULT_CONFIG, createRecallState())!;
     expect(block.indexOf(fresh.id)).toBeGreaterThan(-1);
     expect(block.indexOf(old.id)).toBeGreaterThan(-1);

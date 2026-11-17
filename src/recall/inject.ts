@@ -199,13 +199,13 @@ function getMemoryTags(db: Db, memoryId: string): string[] | null {
  * Returns the hits sorted by score and the age in days of each finding.
  */
 function decayFindings(
-  db: Db,
   hits: SearchHit[],
+  tagsById: Map<string, string[] | null>,
   now: Date
 ): { hits: SearchHit[]; findingAgeDays: Map<string, number> } {
   const findingAgeDays = new Map<string, number>();
   const decayed = hits.map((hit) => {
-    if (hit.type !== "memory" || !getMemoryTags(db, hit.id)?.includes(FINDING_TAG)) {
+    if (hit.type !== "memory" || !tagsById.get(hit.id)?.includes(FINDING_TAG)) {
       return hit;
     }
     const days = ageDays(hit.createdAt, now);
@@ -235,8 +235,9 @@ export function buildPromptBlock(
   }
 
   const recallLimit = state.override?.limit ?? config.recallLimit;
+  // An empty tag list means no tag filter.
   const requiredTags = state.override?.tags;
-  const tagFiltered = requiredTags !== undefined;
+  const tagFiltered = requiredTags !== undefined && requiredTags.length > 0;
 
   // The tag filter runs after the search, so a tag override searches a wider window.
   const rawHits = searchAll(db, projectId, prompt, {
@@ -244,15 +245,22 @@ export function buildPromptBlock(
     types: tagFiltered ? ["memory"] : ["memory", "summary"],
   });
 
+  const tagsById = new Map<string, string[] | null>();
+  for (const hit of rawHits) {
+    if (hit.type === "memory") {
+      tagsById.set(hit.id, getMemoryTags(db, hit.id));
+    }
+  }
+
   // Decay before the threshold filter so old findings can fall below it.
-  const { hits, findingAgeDays } = decayFindings(db, rawHits, now);
+  const { hits, findingAgeDays } = decayFindings(rawHits, tagsById, now);
 
   // Filter by score threshold, exclude already surfaced ids, and apply the tag override
   const filtered = hits.filter(
     (hit) =>
       hit.score >= config.recallThreshold &&
       !state.surfaced.has(hit.id) &&
-      (!tagFiltered || requiredTags.every((tag) => getMemoryTags(db, hit.id)?.includes(tag)))
+      (!tagFiltered || requiredTags.every((tag) => tagsById.get(hit.id)?.includes(tag)))
   );
 
   const selected = filtered.slice(0, recallLimit);

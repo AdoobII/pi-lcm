@@ -1,6 +1,6 @@
 import type { Db } from "./driver.js";
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 export class SchemaTooNewError extends Error {
   constructor(public readonly current: number, public readonly expected: number) {
@@ -32,10 +32,23 @@ function ensureMetaTable(db: Db): void {
   `);
 }
 
-function runMigration1(db: Db): void {
-  db.exec(`
-    BEGIN TRANSACTION;
+function inTransaction(db: Db, migration: () => void): void {
+  db.exec("BEGIN TRANSACTION");
+  try {
+    migration();
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // The original error matters more than a failed rollback.
+    }
+    throw error;
+  }
+}
 
+function runMigration1(db: Db): void {
+  inTransaction(db, () => db.exec(`
     -- Projects table
     CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY,
@@ -193,72 +206,82 @@ function runMigration1(db: Db): void {
 
     -- Record schema version
     INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '1');
-
-    COMMIT;
-  `);
+  `));
 }
 
 function runMigration2(db: Db): void {
-  db.exec(`BEGIN TRANSACTION;`);
+  inTransaction(db, () => {
+    // Check if event_at column exists and add it if not
+    const columns = db
+      .prepare("PRAGMA table_info(messages)")
+      .all<{ name: string }>();
+    const hasEventAt = columns.some((col) => col.name === "event_at");
 
-  // Check if event_at column exists and add it if not
-  const columns = db
-    .prepare("PRAGMA table_info(messages)")
-    .all<{ name: string }>();
-  const hasEventAt = columns.some((col) => col.name === "event_at");
+    if (!hasEventAt) {
+      db.exec(`ALTER TABLE messages ADD COLUMN event_at TEXT;`);
+    }
 
-  if (!hasEventAt) {
-    db.exec(`ALTER TABLE messages ADD COLUMN event_at TEXT;`);
-  }
+    // Drop the non-unique index if it exists (from migration 1)
+    // and create a unique index with the same name
+    db.exec(`DROP INDEX IF EXISTS idx_messages_session_entry;`);
+    db.exec(`CREATE UNIQUE INDEX idx_messages_session_entry ON messages(session_id, entry_id);`);
 
-  // Drop the non-unique index if it exists (from migration 1)
-  // and create a unique index with the same name
-  db.exec(`DROP INDEX IF EXISTS idx_messages_session_entry;`);
-  db.exec(`CREATE UNIQUE INDEX idx_messages_session_entry ON messages(session_id, entry_id);`);
-
-  // Update schema version
-  db.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2')");
-
-  db.exec(`COMMIT;`);
+    // Update schema version
+    db.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2')");
+  });
 }
 
 function runMigration3(db: Db): void {
-  db.exec(`BEGIN TRANSACTION;`);
+  inTransaction(db, () => {
+    // Add content_hash column to memories table if it doesn't exist
+    const columns = db
+      .prepare("PRAGMA table_info(memories)")
+      .all<{ name: string }>();
+    const hasContentHash = columns.some((col) => col.name === "content_hash");
 
-  // Add content_hash column to memories table if it doesn't exist
-  const columns = db
-    .prepare("PRAGMA table_info(memories)")
-    .all<{ name: string }>();
-  const hasContentHash = columns.some((col) => col.name === "content_hash");
+    if (!hasContentHash) {
+      db.exec(`ALTER TABLE memories ADD COLUMN content_hash TEXT;`);
+    }
 
-  if (!hasContentHash) {
-    db.exec(`ALTER TABLE memories ADD COLUMN content_hash TEXT;`);
-  }
+    // Add a unique index on (project_id, content_hash) for deduplication
+    // This must run unconditionally after the column is ensured
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_project_content_hash ON memories(project_id, content_hash)`);
 
-  // Add a unique index on (project_id, content_hash) for deduplication
-  // This must run unconditionally after the column is ensured
-  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_project_content_hash ON memories(project_id, content_hash)`);
-
-  // Update schema version
-  db.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '3')");
-
-  db.exec(`COMMIT;`);
+    // Update schema version
+    db.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '3')");
+  });
 }
 
 function runMigration4(db: Db): void {
-  db.exec(`BEGIN TRANSACTION;`);
+  inTransaction(db, () => {
+    // An external-content FTS5 table needs the old column values to remove a row from the index.
+    db.exec(`
+      DROP TRIGGER IF EXISTS memories_fts_ad;
+      CREATE TRIGGER memories_fts_ad AFTER DELETE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, content, tags) VALUES ('delete', old.rowid, old.content, old.tags);
+      END;
+    `);
 
-  // An external-content FTS5 table needs the old column values to remove a row from the index.
-  db.exec(`
-    DROP TRIGGER IF EXISTS memories_fts_ad;
-    CREATE TRIGGER memories_fts_ad AFTER DELETE ON memories BEGIN
-      INSERT INTO memories_fts(memories_fts, rowid, content, tags) VALUES ('delete', old.rowid, old.content, old.tags);
-    END;
-  `);
+    db.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '4')");
+  });
+}
 
-  db.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '4')");
+function runMigration5(db: Db): void {
+  inTransaction(db, () => {
+    // An external-content FTS5 table needs the old column values to remove a row from the index.
+    db.exec(`
+      DROP TRIGGER IF EXISTS messages_fts_ad;
+      CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+      END;
+      DROP TRIGGER IF EXISTS summaries_fts_ad;
+      CREATE TRIGGER summaries_fts_ad AFTER DELETE ON summaries BEGIN
+        INSERT INTO summaries_fts(summaries_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+      END;
+    `);
 
-  db.exec(`COMMIT;`);
+    db.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '5')");
+  });
 }
 
 /**
@@ -296,6 +319,9 @@ export function migrate(db: Db): void {
     }
     if (currentVersion === null || currentVersion < 4) {
       runMigration4(db);
+    }
+    if (currentVersion === null || currentVersion < 5) {
+      runMigration5(db);
     }
   }
 }

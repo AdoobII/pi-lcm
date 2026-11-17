@@ -597,4 +597,120 @@ describe("schema", () => {
     expect(rows).toHaveLength(0);
     db.close();
   });
+
+  it("deleting_a_message_keeps_fts_consistent", async () => {
+    const db = await openDatabase(":memory:");
+    migrate(db);
+    db.exec(`
+      INSERT INTO projects (id, root) VALUES ('p', '/tmp/p');
+      INSERT INTO sessions (id, project_id, cwd) VALUES ('s', 'p', '/tmp');
+      INSERT INTO messages (id, project_id, session_id, entry_id, seq, role, content, token_count)
+      VALUES (1, 'p', 's', 'e1', 1, 'user', 'deletable message words', 3);
+      DELETE FROM messages WHERE id = 1;
+    `);
+    expect(db.prepare("SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?").all('"deletable"')).toHaveLength(0);
+    expect(() => db.exec("INSERT INTO messages_fts(messages_fts) VALUES('integrity-check')")).not.toThrow();
+    db.close();
+  });
+
+  it("deleting_a_summary_keeps_fts_consistent", async () => {
+    const db = await openDatabase(":memory:");
+    migrate(db);
+    db.exec(`
+      INSERT INTO projects (id, root) VALUES ('p', '/tmp/p');
+      INSERT INTO sessions (id, project_id, cwd) VALUES ('s', 'p', '/tmp');
+      INSERT INTO summaries (id, project_id, session_id, depth, kind, content, token_count, message_count)
+      VALUES ('sum1', 'p', 's', 0, 'leaf', 'deletable summary words', 3, 1);
+      DELETE FROM summaries WHERE id = 'sum1';
+    `);
+    expect(db.prepare("SELECT rowid FROM summaries_fts WHERE summaries_fts MATCH ?").all('"deletable"')).toHaveLength(0);
+    expect(() => db.exec("INSERT INTO summaries_fts(summaries_fts) VALUES('integrity-check')")).not.toThrow();
+    db.close();
+  });
+
+  it("migration_5_upgrades_a_v4_database", async () => {
+    const db = await openDatabase(":memory:");
+    migrate(db);
+    // Simulate a v4 database whose message and summary delete triggers lack old.content.
+    db.exec(`
+      DROP TRIGGER messages_fts_ad;
+      CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid) VALUES ('delete', old.id);
+      END;
+      DROP TRIGGER summaries_fts_ad;
+      CREATE TRIGGER summaries_fts_ad AFTER DELETE ON summaries BEGIN
+        INSERT INTO summaries_fts(summaries_fts, rowid) VALUES ('delete', old.rowid);
+      END;
+      INSERT INTO projects (id, root) VALUES ('p', '/tmp/p');
+      INSERT INTO sessions (id, project_id, cwd) VALUES ('s', 'p', '/tmp');
+      UPDATE meta SET value = '4' WHERE key = 'schema_version';
+    `);
+    migrate(db);
+    const version = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get<{ value: string }>();
+    expect(version?.value).toBe("5");
+    db.exec(`
+      INSERT INTO messages (id, project_id, session_id, entry_id, seq, role, content, token_count)
+      VALUES (1, 'p', 's', 'e1', 1, 'user', 'upgradable message', 3);
+      INSERT INTO summaries (id, project_id, session_id, depth, kind, content, token_count, message_count)
+      VALUES ('sum1', 'p', 's', 0, 'leaf', 'upgradable summary', 3, 1);
+      DELETE FROM messages WHERE id = 1;
+      DELETE FROM summaries WHERE id = 'sum1';
+    `);
+    expect(db.prepare("SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?").all('"upgradable"')).toHaveLength(0);
+    expect(db.prepare("SELECT rowid FROM summaries_fts WHERE summaries_fts MATCH ?").all('"upgradable"')).toHaveLength(0);
+    expect(() => db.exec("INSERT INTO messages_fts(messages_fts) VALUES('integrity-check')")).not.toThrow();
+    expect(() => db.exec("INSERT INTO summaries_fts(summaries_fts) VALUES('integrity-check')")).not.toThrow();
+    db.close();
+  });
+
+  it("failed_migration_rolls_back_and_leaves_version", async () => {
+    const db = await openDatabase(":memory:");
+    migrate(db);
+    // A v4 database without the summaries table: migration 5 recreates messages_fts_ad
+    // successfully, then fails creating summaries_fts_ad.
+    const oldMessageTrigger = `CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid) VALUES ('delete', old.id);
+      END`;
+    db.exec(`
+      DROP TRIGGER messages_fts_ad;
+      ${oldMessageTrigger};
+      DROP TABLE summary_messages;
+      DROP TABLE summary_parents;
+      DROP TABLE summaries;
+      UPDATE meta SET value = '4' WHERE key = 'schema_version';
+    `);
+    expect(() => migrate(db)).toThrow();
+    const version = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get<{ value: string }>();
+    expect(version?.value).toBe("4");
+    const trigger = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'messages_fts_ad'")
+      .get<{ sql: string }>();
+    expect(trigger?.sql).not.toContain("old.content");
+    expect(() => db.exec("BEGIN; ROLLBACK;")).not.toThrow();
+    db.close();
+  });
+
+  it("failed_migration_2_rolls_back_the_added_column", async () => {
+    const db = await openDatabase(":memory:");
+    migrate(db);
+    // A v1 database with duplicate (session_id, entry_id) rows: migration 2 adds event_at,
+    // then fails creating the unique index.
+    db.exec(`
+      DROP INDEX idx_messages_session_entry;
+      CREATE INDEX idx_messages_session_entry ON messages(session_id, entry_id);
+      ALTER TABLE messages DROP COLUMN event_at;
+      INSERT INTO projects (id, root) VALUES ('p', '/tmp/p');
+      INSERT INTO sessions (id, project_id, cwd) VALUES ('s', 'p', '/tmp');
+      INSERT INTO messages (project_id, session_id, entry_id, seq, role, content, token_count)
+      VALUES ('p', 's', 'dup', 1, 'user', 'one', 1), ('p', 's', 'dup', 2, 'user', 'two', 1);
+      UPDATE meta SET value = '1' WHERE key = 'schema_version';
+    `);
+    expect(() => migrate(db)).toThrow();
+    const version = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get<{ value: string }>();
+    expect(version?.value).toBe("1");
+    const columns = db.prepare("PRAGMA table_info(messages)").all<{ name: string }>();
+    expect(columns.some((column) => column.name === "event_at")).toBe(false);
+    expect(() => db.exec("BEGIN; ROLLBACK;")).not.toThrow();
+    db.close();
+  });
 });

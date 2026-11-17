@@ -3,6 +3,9 @@ import type { LcmConfig, Memory, SearchHit, SummaryNode } from "../types.js";
 import { recentMemories } from "../store/memories.js";
 import { searchAll } from "./search.js";
 import { estimateTokens } from "../util/tokens.js";
+import { ageDays, decayedScore } from "./age.js";
+
+const FINDING_TAG = "type:finding";
 
 // FTS snippet delimiters - must match those in src/recall/search.ts
 const SNIPPET_START = "\u0001";
@@ -184,15 +187,33 @@ function getHitContent(db: Db, hit: SearchHit): string {
     .replace(new RegExp(SNIPPET_END, "g"), "");
 }
 
-function memoryHasAllTags(db: Db, memoryId: string, requiredTags: string[]): boolean {
+function getMemoryTags(db: Db, memoryId: string): string[] | null {
   const row = db
     .prepare("SELECT tags FROM memories WHERE id = ?")
     .get<{ tags: string }>(memoryId);
-  if (!row) {
-    return false;
-  }
-  const tags: string[] = JSON.parse(row.tags);
-  return requiredTags.every((tag) => tags.includes(tag));
+  return row ? (JSON.parse(row.tags) as string[]) : null;
+}
+
+/**
+ * Lowers the score of older memory hits tagged type:finding. Other hits keep their score.
+ * Returns the hits sorted by score and the age in days of each finding.
+ */
+function decayFindings(
+  db: Db,
+  hits: SearchHit[],
+  now: Date
+): { hits: SearchHit[]; findingAgeDays: Map<string, number> } {
+  const findingAgeDays = new Map<string, number>();
+  const decayed = hits.map((hit) => {
+    if (hit.type !== "memory" || !getMemoryTags(db, hit.id)?.includes(FINDING_TAG)) {
+      return hit;
+    }
+    const days = ageDays(hit.createdAt, now);
+    findingAgeDays.set(hit.id, days);
+    return { ...hit, score: decayedScore(hit.score, days) };
+  });
+  decayed.sort((a, b) => b.score - a.score);
+  return { hits: decayed, findingAgeDays };
 }
 
 /**
@@ -205,7 +226,8 @@ export function buildPromptBlock(
   sessionId: string,
   prompt: string,
   config: LcmConfig,
-  state: RecallState
+  state: RecallState,
+  now: Date = new Date()
 ): string | null {
   // Return null for empty prompt
   if (prompt.trim().length === 0) {
@@ -217,17 +239,20 @@ export function buildPromptBlock(
   const tagFiltered = requiredTags !== undefined;
 
   // The tag filter runs after the search, so a tag override searches a wider window.
-  const hits = searchAll(db, projectId, prompt, {
+  const rawHits = searchAll(db, projectId, prompt, {
     limit: recallLimit * (tagFiltered ? TAG_FILTER_WINDOW_FACTOR : DEFAULT_WINDOW_FACTOR),
     types: tagFiltered ? ["memory"] : ["memory", "summary"],
   });
+
+  // Decay before the threshold filter so old findings can fall below it.
+  const { hits, findingAgeDays } = decayFindings(db, rawHits, now);
 
   // Filter by score threshold, exclude already surfaced ids, and apply the tag override
   const filtered = hits.filter(
     (hit) =>
       hit.score >= config.recallThreshold &&
       !state.surfaced.has(hit.id) &&
-      (!tagFiltered || memoryHasAllTags(db, hit.id, requiredTags))
+      (!tagFiltered || requiredTags.every((tag) => getMemoryTags(db, hit.id)?.includes(tag)))
   );
 
   const selected = filtered.slice(0, recallLimit);
@@ -250,7 +275,12 @@ export function buildPromptBlock(
   
   for (const hit of selected) {
     const content = getHitContent(db, hit);
-    const line = `- [${hit.id}] ${content}`;
+    const days = findingAgeDays.get(hit.id);
+    const annotation =
+      days !== undefined && days >= 1
+        ? `[finding, ${days}d old, may predate current plan: treat as a hint] `
+        : "";
+    const line = `- [${hit.id}] ${annotation}${content}`;
     const lineTokens = estimateTokens(line);
     items.push({ id: hit.id, line, lineTokens });
   }

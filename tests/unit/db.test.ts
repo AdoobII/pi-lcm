@@ -663,6 +663,48 @@ describe("schema", () => {
     db.close();
   });
 
+  it("migration_5_rebuilds_stale_fts_entries", async () => {
+    const db = await openDatabase(":memory:");
+    migrate(db);
+    // A v3-era database: all three delete triggers omit the old column values.
+    db.exec(`
+      DROP TRIGGER messages_fts_ad;
+      CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid) VALUES ('delete', old.id);
+      END;
+      DROP TRIGGER summaries_fts_ad;
+      CREATE TRIGGER summaries_fts_ad AFTER DELETE ON summaries BEGIN
+        INSERT INTO summaries_fts(summaries_fts, rowid) VALUES ('delete', old.rowid);
+      END;
+      DROP TRIGGER memories_fts_ad;
+      CREATE TRIGGER memories_fts_ad AFTER DELETE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid) VALUES ('delete', old.rowid);
+      END;
+      INSERT INTO projects (id, root) VALUES ('p', '/tmp/p');
+      INSERT INTO sessions (id, project_id, cwd) VALUES ('s', 'p', '/tmp');
+      INSERT INTO messages (id, project_id, session_id, entry_id, seq, role, content, token_count)
+      VALUES (1, 'p', 's', 'e1', 1, 'user', 'staleword message', 3);
+      INSERT INTO summaries (id, project_id, session_id, depth, kind, content, token_count, message_count)
+      VALUES ('sum1', 'p', 's', 0, 'leaf', 'staleword summary', 3, 1);
+      INSERT INTO memories (id, project_id, content, tags, source)
+      VALUES ('m1', 'p', 'staleword memory', '[]', 'manual');
+      DELETE FROM messages WHERE id = 1;
+      DELETE FROM summaries WHERE id = 'sum1';
+      DELETE FROM memories WHERE id = 'm1';
+      UPDATE meta SET value = '4' WHERE key = 'schema_version';
+    `);
+    // The broken triggers left stale index entries behind.
+    for (const table of ["messages_fts", "summaries_fts", "memories_fts"]) {
+      expect(db.prepare(`SELECT rowid FROM ${table} WHERE ${table} MATCH ?`).all('"staleword"')).toHaveLength(1);
+    }
+    migrate(db);
+    for (const table of ["messages_fts", "summaries_fts", "memories_fts"]) {
+      expect(db.prepare(`SELECT rowid FROM ${table} WHERE ${table} MATCH ?`).all('"staleword"')).toHaveLength(0);
+      expect(() => db.exec(`INSERT INTO ${table}(${table}) VALUES('integrity-check')`)).not.toThrow();
+    }
+    db.close();
+  });
+
   it("failed_migration_rolls_back_and_leaves_version", async () => {
     const db = await openDatabase(":memory:");
     migrate(db);

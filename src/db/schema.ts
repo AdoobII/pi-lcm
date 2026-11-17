@@ -280,6 +280,13 @@ function runMigration5(db: Db): void {
       END;
     `);
 
+    // Deletes that ran through the old triggers left stale index entries; rebuild repairs them.
+    db.exec(`
+      INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
+      INSERT INTO summaries_fts(summaries_fts) VALUES('rebuild');
+      INSERT INTO memories_fts(memories_fts) VALUES('rebuild');
+    `);
+
     db.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '5')");
   });
 }

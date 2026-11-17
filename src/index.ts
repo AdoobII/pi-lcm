@@ -5,7 +5,7 @@ import { ensureSession } from "./store/sessions.js";
 import { entryToMessage } from "./store/entries.js";
 import { insertMessages, getMessagesByEntryIds } from "./store/messages.js";
 import { insertSummary } from "./store/summaries.js";
-import { insertMemory } from "./store/memories.js";
+import { deleteMemoriesByTag, insertMemory } from "./store/memories.js";
 import { openDatabase } from "./db/driver.js";
 import { migrate, SchemaTooNewError } from "./db/schema.js";
 import { resolveDbPath, ensureDbDirectory } from "./db/path.js";
@@ -687,6 +687,22 @@ function handleLcmStoreEvent(data: unknown): void {
   }
 }
 
+function handleLcmForgetEvent(data: unknown): void {
+  if (state.disabled || !state.db || !state.projectId) {
+    return;
+  }
+
+  try {
+    const payload = data as { tag?: unknown } | null;
+    if (typeof payload?.tag !== "string" || payload.tag.length === 0) {
+      return;
+    }
+    deleteMemoriesByTag(state.db, state.projectId, payload.tag);
+  } catch (error) {
+    logError(`lcm:forget failed: ${error}`);
+  }
+}
+
 function handleLcmRecallConfigEvent(data: unknown): void {
   if (data === null || data === undefined) {
     state.recall.override = null;
@@ -728,6 +744,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   pi.on("session_shutdown", handleSessionShutdown);
   
   pi.events.on("lcm:store", handleLcmStoreEvent);
+  pi.events.on("lcm:forget", handleLcmForgetEvent);
   pi.events.on("lcm:recall-config", handleLcmRecallConfigEvent);
 
   // Register command

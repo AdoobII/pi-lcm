@@ -182,3 +182,18 @@ export function countMemories(db: Db, projectId: string): number {
   ).get<{ count: number }>(projectId);
   return row?.count ?? 0;
 }
+
+/**
+ * Deletes every memory in the project whose tags array contains exactly `tag`.
+ * Returns the number of deleted rows.
+ */
+export function deleteMemoriesByTag(db: Db, projectId: string, tag: string): number {
+  const matchSql = `FROM memories
+     WHERE project_id = ?
+       AND EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE json_each.value = ?)`;
+  const count = db.prepare(`SELECT COUNT(*) AS count ${matchSql}`).get<{ count: number }>(projectId, tag)?.count ?? 0;
+  if (count > 0) {
+    db.prepare(`DELETE ${matchSql}`).run(projectId, tag);
+  }
+  return count;
+}

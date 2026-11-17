@@ -137,4 +137,40 @@ describe("pi-lcm events", () => {
     expect(hits).toHaveLength(1);
     expect(hits[0]).toContain("target");
   });
+
+  it("lcm_forget_event_deletes_tagged_memories", async () => {
+    const fake = await boot();
+    await startSession(fake);
+    fake.emitBus("lcm:store", { content: "forgettable report finding alpha", tags: ["report:r1"] });
+    fake.emitBus("lcm:store", { content: "forgettable report finding beta", tags: ["report:r1", "mode:plan"] });
+    fake.emitBus("lcm:store", { content: "forgettable report finding gamma", tags: ["report:r2"] });
+    fake.emitBus("lcm:forget", { tag: "report:r1" });
+    const stored = await search(fake, "forgettable");
+    expect(stored).not.toContain("alpha");
+    expect(stored).not.toContain("beta");
+    expect(stored).toContain("gamma");
+  });
+
+  it("forget_matches_exact_tag_only", async () => {
+    const fake = await boot();
+    await startSession(fake);
+    fake.emitBus("lcm:store", { content: "tenth run finding", tags: ["run:10"] });
+    fake.emitBus("lcm:forget", { tag: "run:1" });
+    expect(await search(fake, "tenth")).toContain("tenth run finding");
+  });
+
+  it("forget_ignores_malformed_payload", async () => {
+    const fake = await boot();
+    await startSession(fake);
+    fake.emitBus("lcm:store", { content: "survivor finding", tags: ["keep"] });
+    for (const payload of [null, undefined, "keep", 42, {}, { tag: "" }, { tag: 5 }, { tag: ["keep"] }, { tags: ["keep"] }]) {
+      expect(() => fake.emitBus("lcm:forget", payload)).not.toThrow();
+    }
+    expect(await search(fake, "survivor")).toContain("survivor finding");
+  });
+
+  it("forget_without_project_is_ignored", async () => {
+    const fake = await boot();
+    expect(() => fake.emitBus("lcm:forget", { tag: "x" })).not.toThrow();
+  });
 });

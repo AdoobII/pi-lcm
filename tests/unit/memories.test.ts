@@ -3,7 +3,7 @@ import { openDatabase, type Db } from "../../src/db/driver.js";
 import { migrate } from "../../src/db/schema.js";
 import { ensureProject } from "../../src/store/projects.js";
 import {
-  countMemories, insertMemory, markMemoryUsed, recentMemories, searchMemories,
+  countMemories, deleteMemoriesByTag, insertMemory, markMemoryUsed, recentMemories, searchMemories,
 } from "../../src/store/memories.js";
 import { quoteFtsQuery } from "../../src/util/fts.js";
 
@@ -46,5 +46,32 @@ describe("memories", () => {
     const b = insertMemory(db, projectId, "beta", [], "manual");
     markMemoryUsed(db, a.id);
     expect(recentMemories(db, projectId, 2).map((m) => m.id)).toEqual([a.id, b.id]);
+  });
+
+  it("forget_does_not_touch_other_projects", () => {
+    const other = ensureProject(db, "/tmp/other");
+    insertMemory(db, projectId, "mine", ["run:1"], "auto");
+    insertMemory(db, other, "theirs", ["run:1"], "auto");
+    expect(deleteMemoriesByTag(db, projectId, "run:1")).toBe(1);
+    expect(countMemories(db, projectId)).toBe(0);
+    expect(countMemories(db, other)).toBe(1);
+  });
+
+  it("forget_matches_exact_tag_only", () => {
+    insertMemory(db, projectId, "first run", ["run:1", "mode:plan"], "auto");
+    insertMemory(db, projectId, "tenth run", ["run:10"], "auto");
+    insertMemory(db, projectId, "untagged", [], "auto");
+    expect(deleteMemoriesByTag(db, projectId, "run:1")).toBe(1);
+    expect(countMemories(db, projectId)).toBe(2);
+    expect(deleteMemoriesByTag(db, projectId, "run")).toBe(0);
+    expect(deleteMemoriesByTag(db, projectId, "run:2")).toBe(0);
+  });
+
+  it("deleted_memory_no_longer_found_by_fts_search", () => {
+    insertMemory(db, projectId, "flaky deploy checklist", ["run:7"], "auto");
+    expect(searchMemories(db, projectId, "deploy checklist", 5)).toHaveLength(1);
+    deleteMemoriesByTag(db, projectId, "run:7");
+    expect(searchMemories(db, projectId, "deploy checklist", 5)).toHaveLength(0);
+    expect(db.prepare("SELECT COUNT(*) AS c FROM memories_fts WHERE memories_fts MATCH ?").get<{ c: number }>('"deploy"')?.c).toBe(0);
   });
 });

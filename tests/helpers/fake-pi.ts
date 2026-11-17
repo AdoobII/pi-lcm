@@ -13,6 +13,7 @@ interface FakePiOptions {
 interface FakePi {
   api: ExtensionAPI;
   emit: <T, R>(event: string, payload: T) => Promise<R | undefined>;
+  emitBus: (channel: string, data: unknown) => void;
   tools: Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>;
   commands: Map<string, { handler: (ctx: ExtensionContext) => Promise<void> }>;
   context: ExtensionContext;
@@ -144,6 +145,26 @@ export function createFakePi(options: FakePiOptions): FakePi {
 
   let currentBranch = branch;
 
+  const busHandlers = new Map<string, Array<(data: unknown) => void>>();
+  const events = {
+    emit: (channel: string, data: unknown) => {
+      for (const handler of busHandlers.get(channel) ?? []) {
+        handler(data);
+      }
+    },
+    on: (channel: string, handler: (data: unknown) => void) => {
+      if (!busHandlers.has(channel)) {
+        busHandlers.set(channel, []);
+      }
+      busHandlers.get(channel)!.push(handler);
+      return () => {
+        const list = busHandlers.get(channel) ?? [];
+        const index = list.indexOf(handler);
+        if (index >= 0) list.splice(index, 1);
+      };
+    },
+  };
+
   const api: ExtensionAPI = {
     on: <E, R>(event: string, handler: (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void) => {
       if (!handlers.has(event)) {
@@ -176,6 +197,7 @@ export function createFakePi(options: FakePiOptions): FakePi {
     getKeybindings: () => [],
     getFlags: () => ({}),
     getConfig: () => ({}),
+    events,
   } as unknown as ExtensionAPI;
 
   const emit = async <T, R>(event: string, payload: T): Promise<R | undefined> => {
@@ -206,6 +228,7 @@ export function createFakePi(options: FakePiOptions): FakePi {
   return {
     api,
     emit,
+    emitBus: events.emit,
     tools,
     commands,
     context,

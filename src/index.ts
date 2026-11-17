@@ -5,6 +5,7 @@ import { ensureSession } from "./store/sessions.js";
 import { entryToMessage } from "./store/entries.js";
 import { insertMessages, getMessagesByEntryIds } from "./store/messages.js";
 import { insertSummary } from "./store/summaries.js";
+import { insertMemory } from "./store/memories.js";
 import { openDatabase } from "./db/driver.js";
 import { migrate, SchemaTooNewError } from "./db/schema.js";
 import { resolveDbPath, ensureDbDirectory } from "./db/path.js";
@@ -320,7 +321,10 @@ async function handleSessionStart(event: { type: string; reason: string }, ctx: 
     
     // Reset state
     state.lastSyncedEntryId = null;
+    // The recall override persists until the next lcm:recall-config event.
+    const recallOverride = state.recall.override;
     state.recall = createRecallState();
+    state.recall.override = recallOverride;
     
     // Sync branch
     await syncMessages(ctx, state);
@@ -662,6 +666,41 @@ async function handleLcmModelCommand(_args: string, ctx: ExtensionCommandContext
   }
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function handleLcmStoreEvent(data: unknown): void {
+  if (state.disabled || !state.db || !state.projectId) {
+    return;
+  }
+
+  try {
+    const payload = data as { content?: unknown; tags?: unknown } | null;
+    if (typeof payload?.content !== "string" || payload.content.trim().length === 0) {
+      return;
+    }
+    const tags = isStringArray(payload.tags) ? payload.tags : [];
+    insertMemory(state.db, state.projectId, payload.content, tags, "auto");
+  } catch (error) {
+    logError(`lcm:store failed: ${error}`);
+  }
+}
+
+function handleLcmRecallConfigEvent(data: unknown): void {
+  if (data === null || data === undefined) {
+    state.recall.override = null;
+    return;
+  }
+
+  const payload = data as { limit?: unknown; tags?: unknown };
+  const limit = typeof payload.limit === "number" && Number.isInteger(payload.limit) && payload.limit > 0
+    ? payload.limit
+    : undefined;
+  const tags = isStringArray(payload.tags) ? payload.tags : undefined;
+  state.recall.override = { limit, tags };
+}
+
 export default async function (pi: ExtensionAPI): Promise<void> {
   // Initialize fresh state for this extension instance
   state = createExtensionState();
@@ -688,6 +727,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   pi.on("before_agent_start", handleBeforeAgentStart);
   pi.on("session_shutdown", handleSessionShutdown);
   
+  pi.events.on("lcm:store", handleLcmStoreEvent);
+  pi.events.on("lcm:recall-config", handleLcmRecallConfigEvent);
+
   // Register command
   pi.registerCommand("lcm-model", {
     description: "Select the summarizer model for pi-lcm compaction",

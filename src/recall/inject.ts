@@ -8,15 +8,25 @@ import { estimateTokens } from "../util/tokens.js";
 const SNIPPET_START = "\u0001";
 const SNIPPET_END = "\u0002";
 
+const DEFAULT_WINDOW_FACTOR = 2;
+const TAG_FILTER_WINDOW_FACTOR = 10;
+
+export interface RecallOverride {
+  limit?: number;
+  tags?: string[];
+}
+
 export interface RecallState {
   surfaced: Set<string>;
   restored: boolean;
+  override: RecallOverride | null;
 }
 
 export function createRecallState(): RecallState {
   return {
     surfaced: new Set<string>(),
     restored: false,
+    override: null,
   };
 }
 
@@ -174,6 +184,17 @@ function getHitContent(db: Db, hit: SearchHit): string {
     .replace(new RegExp(SNIPPET_END, "g"), "");
 }
 
+function memoryHasAllTags(db: Db, memoryId: string, requiredTags: string[]): boolean {
+  const row = db
+    .prepare("SELECT tags FROM memories WHERE id = ?")
+    .get<{ tags: string }>(memoryId);
+  if (!row) {
+    return false;
+  }
+  const tags: string[] = JSON.parse(row.tags);
+  return requiredTags.every((tag) => tags.includes(tag));
+}
+
 /**
  * Build the prompt block with relevant memories and summaries matching the prompt.
  * Returns null for empty prompt or when nothing qualifies.
@@ -191,21 +212,25 @@ export function buildPromptBlock(
     return null;
   }
 
-  // Search for relevant items
+  const recallLimit = state.override?.limit ?? config.recallLimit;
+  const requiredTags = state.override?.tags;
+  const tagFiltered = requiredTags !== undefined;
+
+  // The tag filter runs after the search, so a tag override searches a wider window.
   const hits = searchAll(db, projectId, prompt, {
-    limit: config.recallLimit * 2,
-    types: ["memory", "summary"],
+    limit: recallLimit * (tagFiltered ? TAG_FILTER_WINDOW_FACTOR : DEFAULT_WINDOW_FACTOR),
+    types: tagFiltered ? ["memory"] : ["memory", "summary"],
   });
 
-  // Filter by score threshold and exclude already surfaced ids
+  // Filter by score threshold, exclude already surfaced ids, and apply the tag override
   const filtered = hits.filter(
     (hit) =>
       hit.score >= config.recallThreshold &&
-      !state.surfaced.has(hit.id)
+      !state.surfaced.has(hit.id) &&
+      (!tagFiltered || memoryHasAllTags(db, hit.id, requiredTags))
   );
 
-  // Take up to recallLimit items
-  const selected = filtered.slice(0, config.recallLimit);
+  const selected = filtered.slice(0, recallLimit);
 
   // Check if we have anything to include
   if (selected.length === 0) {

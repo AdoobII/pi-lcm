@@ -30,6 +30,16 @@ describe("parseTriggerInput", () => {
     expect(parseTriggerInput("40", "tokens").ok).toBe(false);
   });
 
+  it("parse_rejects_leading_zero_fraction_and_sign_edge_cases", () => {
+    expect(parseTriggerInput("040%")).toEqual({ ok: true, trigger: { mode: "percent", value: 40 } });
+    expect(parseTriggerInput("40.5%")).toEqual({ ok: true, trigger: { mode: "percent", value: 40.5 } });
+    expect(parseTriggerInput("+40%").ok).toBe(false);
+    expect(parseTriggerInput("40", "percent")).toEqual({ ok: true, trigger: { mode: "percent", value: 40 } });
+    const tooSmall = parseTriggerInput("100", "tokens");
+    expect(tooSmall.ok).toBe(false);
+    if (!tooSmall.ok) expect(tooSmall.reason).toContain("20000");
+  });
+
   it("parse_rejects_garbage", () => {
     const inputs = [
       "abc", "-5%", "0", "4%", "95%", "10k", "1e999", "4o0k", "", "   ", "NaN", "Infinity", "-Infinity",

@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_CONFIG, loadConfig, saveModelChoice, saveTriggerChoice } from "../../src/config.js";
 import { DEFAULT_COMPACTION_FOCUS } from "../../src/compact/prompts.js";
 
@@ -15,6 +16,11 @@ function globalFile(): string {
 
 function writeGlobal(value: unknown): void {
   writeFileSync(globalFile(), typeof value === "string" ? value : JSON.stringify(value));
+}
+
+function writeProject(value: unknown): void {
+  mkdirSync(join(projectRoot, CONFIG_DIR_NAME), { recursive: true });
+  writeFileSync(join(projectRoot, CONFIG_DIR_NAME, "lcm.json"), JSON.stringify(value));
 }
 
 function load(env: NodeJS.ProcessEnv = {}) {
@@ -82,6 +88,19 @@ describe("compactionTrigger config", () => {
     }
     writeGlobal({});
     expect(load({ PI_LCM_COMPACT_TRIGGER: "abc" }).compactionTrigger).toBeNull();
+  });
+
+  it("trigger_trusted_project_overrides_global", () => {
+    writeGlobal({ compactionTrigger: { mode: "percent", value: 40 } });
+    writeProject({ compactionTrigger: { mode: "tokens", value: 300000 } });
+    expect(loadConfig({ projectRoot, env: {}, trusted: true }).compactionTrigger).toEqual({ mode: "tokens", value: 300000 });
+    expect(loadConfig({ projectRoot, env: {}, trusted: false }).compactionTrigger).toEqual({ mode: "percent", value: 40 });
+  });
+
+  it("trigger_bad_project_value_falls_back_to_global", () => {
+    writeGlobal({ compactionTrigger: { mode: "percent", value: 40 } });
+    writeProject({ compactionTrigger: { mode: "percent", value: 4 } });
+    expect(loadConfig({ projectRoot, env: {}, trusted: true }).compactionTrigger).toEqual({ mode: "percent", value: 40 });
   });
 
   it("trigger_save_keeps_other_keys", () => {

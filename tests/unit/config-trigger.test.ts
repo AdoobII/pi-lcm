@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -114,9 +114,29 @@ describe("compactionTrigger config", () => {
     expect(load().compactionTrigger).toEqual({ mode: "percent", value: 40 });
   });
 
-  it("trigger_save_swallows_write_errors", () => {
-    process.env.HOME = join(home, "does-not-exist");
-    expect(() => saveTriggerChoice({ mode: "off", value: 0 })).not.toThrow();
+  it("trigger_save_swallows_write_errors_and_returns_false", () => {
+    rmSync(join(home, ".pi"), { recursive: true, force: true });
+    writeFileSync(join(home, ".pi"), "not a directory");
+    let saved: boolean | undefined;
+    expect(() => { saved = saveTriggerChoice({ mode: "off", value: 0 }); }).not.toThrow();
+    expect(saved).toBe(false);
+    expect(saveModelChoice("a/b")).toBe(false);
+  });
+
+  it("save_creates_missing_directory_and_returns_true", () => {
+    rmSync(join(home, ".pi"), { recursive: true, force: true });
+    expect(saveTriggerChoice({ mode: "percent", value: 40 })).toBe(true);
+    expect(load().compactionTrigger).toEqual({ mode: "percent", value: 40 });
+    expect(saveModelChoice("a/b")).toBe(true);
+  });
+
+  it("atomic_write_leaves_no_temp_file_and_keeps_other_keys", () => {
+    writeGlobal({ model: "keep/me", futureKey: { nested: [1, 2] } });
+    expect(saveTriggerChoice({ mode: "tokens", value: 400000 })).toBe(true);
+    expect(saveModelChoice("new/model")).toBe(true);
+    const saved = JSON.parse(readFileSync(globalFile(), "utf-8"));
+    expect(saved).toEqual({ model: "new/model", futureKey: { nested: [1, 2] }, compactionTrigger: { mode: "tokens", value: 400000 } });
+    expect(readdirSync(join(home, ".pi", "agent"))).toEqual(["lcm.json"]);
   });
 });
 

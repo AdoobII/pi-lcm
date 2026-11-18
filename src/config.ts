@@ -1,6 +1,6 @@
-import { readFileSync, writeFileSync } from "fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_COMPACTION_FOCUS } from "./compact/prompts.js";
 import { parseTriggerInput, sanitizeTrigger, type CompactionTrigger } from "./trigger.js";
@@ -95,24 +95,30 @@ export function loadConfig(opts: { projectRoot: string; env: NodeJS.ProcessEnv; 
   return config as LcmConfig;
 }
 
-export function saveModelChoice(model: string): void {
-  const paths = configPaths("");
+// Writes the global lcm.json through a temp file in the same directory so a crash or a full disk cannot leave a half-written file.
+function updateGlobalConfig(changes: Partial<LcmConfig>): boolean {
+  const path = configPaths("").global;
+  const tempPath = `${path}.${process.pid}.tmp`;
   try {
-    const existing = readConfigFile(paths.global) ?? {};
-    const updated = { ...existing, model };
-    writeFileSync(paths.global, JSON.stringify(updated, null, 2));
+    const existing = readConfigFile(path) ?? {};
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(tempPath, JSON.stringify({ ...existing, ...changes }, null, 2));
+    renameSync(tempPath, path);
+    return true;
   } catch {
-    // Swallow errors
+    try {
+      rmSync(tempPath, { force: true });
+    } catch {
+      // Ignore cleanup failure.
+    }
+    return false;
   }
 }
 
-export function saveTriggerChoice(trigger: CompactionTrigger): void {
-  const paths = configPaths("");
-  try {
-    const existing = readConfigFile(paths.global) ?? {};
-    const updated = { ...existing, compactionTrigger: trigger };
-    writeFileSync(paths.global, JSON.stringify(updated, null, 2));
-  } catch {
-    // Swallow errors
-  }
+export function saveModelChoice(model: string): boolean {
+  return updateGlobalConfig({ model });
+}
+
+export function saveTriggerChoice(trigger: CompactionTrigger): boolean {
+  return updateGlobalConfig({ compactionTrigger: trigger });
 }

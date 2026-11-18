@@ -4,6 +4,9 @@ import type { Model as PiModel, Api, TextContent, Usage } from "@earendil-works/
 interface FakePiOptions {
   cwd?: string;
   hasUI?: boolean;
+  mode?: "tui" | "rpc" | "json" | "print";
+  isIdle?: () => boolean;
+  hasPendingMessages?: () => boolean;
   branch?: SessionEntry[];
   selectResult?: string;
   completeText?: string;
@@ -125,7 +128,9 @@ function createFakeContext(cwd: string, branch: SessionEntry[], options: FakePiO
   return {
     cwd,
     hasUI: options.hasUI ?? false,
-    mode: "interactive",
+    mode: options.mode ?? "tui",
+    isIdle: options.isIdle ?? (() => true),
+    hasPendingMessages: options.hasPendingMessages ?? (() => false),
     model: {
       provider: "test",
       id: "test-model",

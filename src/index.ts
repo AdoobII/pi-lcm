@@ -397,11 +397,28 @@ async function handleAgentSettled(event: unknown, ctx: ExtensionContext): Promis
     logError(`agent_settled sync failed: ${error}`);
   }
 
-  try {
-    evaluateCompactionTrigger(ctx);
-  } catch (error) {
-    logError(`agent_settled trigger failed: ${error}`);
+  scheduleCompactionTrigger(ctx);
+}
+
+// Print, json and rpc runs send their next prompt right after settle, so a compaction started then
+// would reject that prompt or race it.
+const NON_INTERACTIVE_MODES: ReadonlySet<string> = new Set(["print", "json", "rpc"]);
+
+// Pi starts deferred prompts after the agent_settled handlers return. Checking from a timer runs
+// after they have started, so the idle and pending-message checks can see them.
+function scheduleCompactionTrigger(ctx: ExtensionContext): void {
+  if (NON_INTERACTIVE_MODES.has(ctx.mode)) {
+    return;
   }
+  const epoch = triggerEpoch;
+  setTimeout(() => {
+    try {
+      if (epoch !== triggerEpoch) return;
+      evaluateCompactionTrigger(ctx);
+    } catch (error) {
+      logError(`agent_settled trigger failed: ${error}`);
+    }
+  }, 0);
 }
 
 function readKeepRecentTokens(): number {
@@ -410,7 +427,7 @@ function readKeepRecentTokens(): number {
 }
 
 function evaluateCompactionTrigger(ctx: ExtensionContext): void {
-  if (state.compactRequested) {
+  if (state.compactRequested || !ctx.isIdle() || ctx.hasPendingMessages()) {
     return;
   }
   const usage = ctx.getContextUsage();
@@ -427,6 +444,7 @@ function evaluateCompactionTrigger(ctx: ExtensionContext): void {
   }
 
   const tokens = usage.tokens;
+
   const epoch = triggerEpoch;
   state.compactRequested = true;
   try {

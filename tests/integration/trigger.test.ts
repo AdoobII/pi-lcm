@@ -20,11 +20,18 @@ interface BootOptions {
   trigger?: string;
   model?: string | null;
   hasUI?: boolean;
+  mode?: "tui" | "rpc" | "json" | "print";
+  isIdle?: () => boolean;
+  hasPendingMessages?: () => boolean;
   tokens?: () => number | null;
   contextWindow?: number;
   settings?: unknown;
   usageThrows?: boolean;
   compactThrows?: boolean;
+}
+
+function deferredTick(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 async function boot(options: BootOptions = {}) {
@@ -54,6 +61,9 @@ async function boot(options: BootOptions = {}) {
   const fake = createFakePi({
     cwd,
     hasUI: options.hasUI ?? false,
+    mode: options.mode,
+    isIdle: options.isIdle,
+    hasPendingMessages: options.hasPendingMessages,
     settings: options.settings,
     notify: (message) => notifications.push(message),
     getContextUsage: () => {
@@ -71,8 +81,16 @@ async function boot(options: BootOptions = {}) {
     fake,
     compactCalls,
     notifications,
-    settle: () => fake.emit("agent_settled", { type: "agent_settled" }),
-    settleStrict: () => fake.emitStrict("agent_settled", { type: "agent_settled" }),
+    settle: async () => {
+      await fake.emit("agent_settled", { type: "agent_settled" });
+      await deferredTick();
+    },
+    settleStrict: async () => {
+      await fake.emitStrict("agent_settled", { type: "agent_settled" });
+      await deferredTick();
+    },
+    emitSettledOnly: () => fake.emit("agent_settled", { type: "agent_settled" }),
+    deferredTick,
   };
 }
 
@@ -168,5 +186,55 @@ describe("agent_settled trigger", () => {
     await fake.emit("session_start", { type: "session_start", reason: "new" });
     await settle();
     expect(compactCalls).toHaveLength(3);
+  });
+
+  it("deferred_prompt_queued_at_settle_prevents_compaction", async () => {
+    let pending = true;
+    const { compactCalls, emitSettledOnly, deferredTick } = await boot({
+      trigger: "40%",
+      tokens: () => 450_000,
+      hasPendingMessages: () => pending,
+    });
+    await emitSettledOnly();
+    await deferredTick();
+    expect(compactCalls).toHaveLength(0);
+    pending = false;
+    await emitSettledOnly();
+    await deferredTick();
+    expect(compactCalls).toHaveLength(1);
+  });
+
+  it("not_idle_at_deferred_check_skips_this_settle", async () => {
+    let idle = false;
+    const { compactCalls, settle } = await boot({ trigger: "40%", tokens: () => 450_000, isIdle: () => idle });
+    await settle();
+    expect(compactCalls).toHaveLength(0);
+    idle = true;
+    await settle();
+    expect(compactCalls).toHaveLength(1);
+  });
+
+  it("print_json_and_rpc_modes_never_compact", async () => {
+    for (const mode of ["print", "json", "rpc"] as const) {
+      const run = await boot({ trigger: "40%", mode, tokens: () => 900_000 });
+      await run.settle();
+      expect(run.compactCalls).toHaveLength(0);
+    }
+  });
+
+  it("compaction_starts_after_the_settle_emission_returns", async () => {
+    const { compactCalls, emitSettledOnly, deferredTick } = await boot({ trigger: "40%", tokens: () => 450_000 });
+    await emitSettledOnly();
+    expect(compactCalls).toHaveLength(0);
+    await deferredTick();
+    expect(compactCalls).toHaveLength(1);
+  });
+
+  it("session_start_between_settle_and_deferred_check_cancels_compaction", async () => {
+    const { fake, compactCalls, emitSettledOnly, deferredTick } = await boot({ trigger: "40%", tokens: () => 450_000 });
+    await emitSettledOnly();
+    await fake.emit("session_start", { type: "session_start", reason: "new" });
+    await deferredTick();
+    expect(compactCalls).toHaveLength(0);
   });
 });

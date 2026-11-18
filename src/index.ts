@@ -15,8 +15,8 @@ import { buildFocus } from "./compact/prompts.js";
 import { shouldCompact } from "./trigger-runtime.js";
 import { createRecallState, buildRestoreBlock, buildPromptBlock } from "./recall/inject.js";
 import { registerTools, ToolDeps } from "./tools/index.js";
-import { loadConfig, saveModelChoice, saveTriggerChoice, compactionTriggerSource, globalConfigIsUnparseable, configPaths, DEFAULT_CONFIG, type CompactionTriggerSource } from "./config.js";
-import { askTrigger } from "./trigger-prompt.js";
+import { loadConfig, saveModelChoice, saveTriggerChoice, compactionTriggerSource, globalConfigIsUnparseable, globalConfigIsUnreadable, parseCompactTriggerEnv, configPaths, DEFAULT_CONFIG, type CompactionTriggerSource } from "./config.js";
+import { askTrigger, type ModelWindow } from "./trigger-prompt.js";
 import { DEFAULT_KEEP_RECENT_TOKENS, type CompactionTrigger } from "./trigger.js";
 import { createExtensionState, ExtensionState } from "./state.js";
 import { logError, logWarn, logDebug } from "./util/log.js";
@@ -53,14 +53,29 @@ function getSessionId(): string {
   return getState().sessionId ?? "";
 }
 
-function resolveModelChoice(ctx: ExtensionContext, config: LcmConfig): Promise<string | null> {
+// Pi's RPC mode reads stdin only after the session_start handlers finish, so a dialog there is never answered and hangs the session.
+function canPromptAtSessionStart(ctx: ExtensionContext): boolean {
+  return ctx.hasUI && ctx.mode === "tui";
+}
+
+function notifySaveFailure(ctx: ExtensionContext, what: "model" | "trigger"): void {
+  if (globalConfigIsUnparseable()) {
+    ctx.ui.notify("pi-lcm: lcm.json is not valid JSON; fix or remove it, choice applies for this session only", "warning");
+  } else if (globalConfigIsUnreadable()) {
+    ctx.ui.notify(`pi-lcm: could not read lcm.json at ${configPaths("").global}; the ${what} choice applies for this session only`, "warning");
+  } else {
+    ctx.ui.notify(`pi-lcm: could not save the ${what} choice to ${configPaths("").global}; it applies for this session only`, "warning");
+  }
+}
+
+// canPrompt is false for session start outside the terminal UI. The /lcm-model command passes ctx.hasUI.
+function resolveModelChoice(ctx: ExtensionContext, config: LcmConfig, canPrompt: boolean): Promise<string | null> {
   // Return config.model when set
   if (config.model) {
     return Promise.resolve(config.model);
   }
   
-  // When ctx.hasUI is false, return null
-  if (!ctx.hasUI) {
+  if (!canPrompt) {
     return Promise.resolve(null);
   }
   
@@ -80,8 +95,8 @@ function resolveModelChoice(ctx: ExtensionContext, config: LcmConfig): Promise<s
       return "active";
     }
     // Persist non-null choices
-    if (choice) {
-      saveModelChoice(choice);
+    if (choice && !saveModelChoice(choice)) {
+      notifySaveFailure(ctx, "model");
     }
     return choice;
   });
@@ -296,6 +311,7 @@ async function handleSessionStart(event: { type: string; reason: string }, ctx: 
       trusted: ctx.isProjectTrusted(),
     });
     state.config = config;
+    warnAboutInvalidTriggerEnv(ctx);
     
     logDebug(`session_start: config loaded, model=${config.model}, dbPath=${config.dbPath}`);
     
@@ -342,7 +358,7 @@ async function handleSessionStart(event: { type: string; reason: string }, ctx: 
     await syncMessages(ctx, state);
     
     // Resolve model choice
-    const choice = await resolveModelChoice(ctx, config);
+    const choice = await resolveModelChoice(ctx, config, canPromptAtSessionStart(ctx));
     state.modelChoice = choice;
     
     logDebug(`session_start: modelChoice=${choice}`);
@@ -362,9 +378,8 @@ async function handleSessionStart(event: { type: string; reason: string }, ctx: 
     
     logDebug(`session_start: model=${model?.id ?? "null"}`);
     
-    // Warn if no model and no UI
-    if (state.model === null && !ctx.hasUI) {
-      logWarn("pi-lcm: no summarizer model configured; skipping pi-lcm compaction");
+    if (choice === null && !canPromptAtSessionStart(ctx)) {
+      logWarn("pi-lcm: no summarizer model configured; run /lcm-model in an interactive session or set PI_LCM_MODEL; skipping pi-lcm compaction");
     }
     
     logDebug("session_start: complete");
@@ -379,20 +394,36 @@ async function handleSessionStart(event: { type: string; reason: string }, ctx: 
   }
 }
 
-// Pi's reserveTokens hint is per context window, so collect the windows of every model the user can pick.
-function collectContextWindows(ctx: ExtensionContext): number[] {
-  const windows: number[] = [];
+// Pi's reserveTokens hint is per model, so collect the windows of every model the user can pick.
+function collectModelWindows(ctx: ExtensionContext): ModelWindow[] {
+  const models: ModelWindow[] = [];
   try {
     for (const model of ctx.modelRegistry.getAvailable()) {
-      windows.push(model.contextWindow);
+      models.push({ id: `${model.provider}/${model.id}`, contextWindow: model.contextWindow });
     }
   } catch (error) {
-    logDebug(`collectContextWindows failed: ${error}`);
+    logDebug(`collectModelWindows failed: ${error}`);
   }
-  if (windows.length === 0 && ctx.model) {
-    windows.push(ctx.model.contextWindow);
+  if (models.length === 0 && ctx.model) {
+    models.push({ id: `${ctx.model.provider}/${ctx.model.id}`, contextWindow: ctx.model.contextWindow });
   }
-  return windows.filter((window) => Number.isFinite(window) && window > 0);
+  return models.filter(({ contextWindow }) => Number.isFinite(contextWindow) && contextWindow > 0);
+}
+
+function warnAboutInvalidTriggerEnv(ctx: ExtensionContext): void {
+  const parsed = parseCompactTriggerEnv(process.env);
+  if (parsed === null || parsed.ok) {
+    return;
+  }
+  const message = `pi-lcm: PI_LCM_COMPACT_TRIGGER=${JSON.stringify(process.env.PI_LCM_COMPACT_TRIGGER)} is not valid (${parsed.reason}); ignoring it and using the saved or project choice`;
+  logWarn(message);
+  if (ctx.hasUI) {
+    try {
+      ctx.ui.notify(message, "warning");
+    } catch (error) {
+      logDebug(`env warning notify failed: ${error}`);
+    }
+  }
 }
 
 function overridingTriggerSource(ctx: ExtensionContext): "env" | "project" | null {
@@ -405,17 +436,13 @@ function overridingTriggerSource(ctx: ExtensionContext): "env" | "project" | nul
 }
 
 async function promptAndSaveTrigger(ctx: ExtensionContext): Promise<{ trigger: CompactionTrigger; overriddenBy: "env" | "project" | null } | undefined> {
-  const trigger = await askTrigger(ctx, collectContextWindows(ctx), readKeepRecentTokens());
+  const trigger = await askTrigger(ctx, collectModelWindows(ctx), readKeepRecentTokens());
   if (!trigger) {
     return undefined;
   }
   const overriddenBy = overridingTriggerSource(ctx);
   if (!saveTriggerChoice(trigger)) {
-    if (globalConfigIsUnparseable()) {
-      ctx.ui.notify("pi-lcm: lcm.json is not valid JSON; fix or remove it, choice applies for this session only", "warning");
-    } else {
-      ctx.ui.notify(`pi-lcm: could not save the trigger choice to ${configPaths("").global}; it applies for this session only`, "warning");
-    }
+    notifySaveFailure(ctx, "trigger");
   }
   if (overriddenBy === null) {
     state.config = { ...state.config, compactionTrigger: trigger };
@@ -431,10 +458,11 @@ function describeTrigger(trigger: CompactionTrigger): string {
 }
 
 async function runFirstTriggerPrompt(ctx: ExtensionContext): Promise<void> {
-  if (state.config.compactionTrigger !== null || process.env.PI_LCM_COMPACT_TRIGGER !== undefined) {
+  // A valid PI_LCM_COMPACT_TRIGGER is part of state.config. An invalid one is ignored, as if unset.
+  if (state.config.compactionTrigger !== null) {
     return;
   }
-  if (!ctx.hasUI) {
+  if (!canPromptAtSessionStart(ctx)) {
     logWarn("pi-lcm: no compaction trigger chosen; run /lcm-trigger in an interactive session to choose one");
     return;
   }
@@ -636,6 +664,22 @@ async function handleSessionTree(event: SessionTreeEvent, ctx: ExtensionContext)
   }
 }
 
+// Returning undefined for a compaction pi-lcm triggered would make Pi fall back to its default compaction on the main model.
+// Cancelling makes Pi call onError, which records the failure and backs off. Other compactions keep Pi's fallback.
+function cancelTriggeredCompaction(ctx: ExtensionContext, signal: AbortSignal): { cancel: true } | undefined {
+  if (!state.compactRequested || signal.aborted) {
+    return undefined;
+  }
+  if (ctx.hasUI) {
+    try {
+      ctx.ui.notify("pi-lcm: summariser failed; compaction skipped, will retry after more growth", "warning");
+    } catch (error) {
+      logDebug(`summariser failure notify failed: ${error}`);
+    }
+  }
+  return { cancel: true };
+}
+
 async function handleSessionBeforeCompact(event: {
   type: string;
   preparation: { firstKeptEntryId: string; tokensBefore: number };
@@ -644,7 +688,7 @@ async function handleSessionBeforeCompact(event: {
   reason: string;
   willRetry: boolean;
   signal: AbortSignal;
-}, ctx: ExtensionContext): Promise<{ compaction: CompactionOutcome } | undefined> {
+}, ctx: ExtensionContext): Promise<{ compaction: CompactionOutcome } | { cancel: true } | undefined> {
   if (state.disabled) {
     logDebug("session_before_compact: disabled");
     return undefined;
@@ -703,14 +747,14 @@ async function handleSessionBeforeCompact(event: {
     
     if (!outcome) {
       logDebug("session_before_compact: compactSpan returned undefined");
-      return undefined;
+      return cancelTriggeredCompaction(ctx, event.signal);
     }
     
     return { compaction: outcome };
   } catch (error) {
     logError(`session_before_compact failed: ${error}`);
     state.isCompacting = false;
-    return undefined;
+    return cancelTriggeredCompaction(ctx, event.signal);
   } finally {
     state.isCompacting = false;
   }
@@ -724,6 +768,11 @@ async function handleSessionCompact(event: {
   if (state.disabled) {
     return;
   }
+
+  // Any successful compaction, including Pi's own and /compact, ends the failure back-off.
+  // A triggered compaction sets justCompacted in its onComplete, which runs after this event.
+  state.lastFailure = null;
+  state.justCompacted = false;
   
   try {
     // When !event.fromExtension, store the produced summary as a legacy node
@@ -863,10 +912,14 @@ async function handleLcmModelCommand(_args: string, ctx: ExtensionCommandContext
   try {
     // Re-run the picker
     const config = state.config;
-    const choice = await resolveModelChoice(ctx, config);
+    const choice = await resolveModelChoice(ctx, config, ctx.hasUI);
     
     if (choice) {
-      saveModelChoice(choice);
+      // The picker saves, and reports a failed save of, a model the user just picked.
+      const pickerSaved = !config.model && choice !== "active";
+      if (!pickerSaved && !saveModelChoice(choice)) {
+        notifySaveFailure(ctx, "model");
+      }
       state.modelChoice = choice;
       
       // Resolve model

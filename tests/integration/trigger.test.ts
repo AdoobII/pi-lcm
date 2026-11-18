@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import extension, { setTriggerSettleDelayMs } from "../../src/index.js";
 import { DEFAULT_COMPACTION_FOCUS } from "../../src/compact/prompts.js";
 import { createFakePi } from "../helpers/fake-pi.js";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 type CompactOptions = { customInstructions?: string; onComplete?: (result: unknown) => void; onError?: (error: Error) => void };
 
@@ -32,6 +33,8 @@ interface BootOptions {
   usageThrows?: boolean;
   compactThrows?: boolean;
   triggerInRpc?: boolean;
+  branch?: SessionEntry[];
+  completeError?: Error;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -76,6 +79,8 @@ async function boot(options: BootOptions = {}) {
     cwd,
     hasUI: options.hasUI ?? false,
     mode: options.mode,
+    branch: options.branch,
+    completeError: options.completeError,
     isIdle: options.isIdle,
     hasPendingMessages: options.hasPendingMessages,
     settings: options.settings,
@@ -384,5 +389,98 @@ describe("agent_settled trigger", () => {
     await fake.emit("session_start", { type: "session_start", reason: "new" });
     await deferredTick();
     expect(compactCalls).toHaveLength(0);
+  });
+});
+
+const branch = [
+  { type: "message", id: "e1", parentId: null, timestamp: "2026-01-01T00:00:00.000Z", message: { role: "user", content: "hello", timestamp: 1 } },
+  { type: "message", id: "e2", parentId: "e1", timestamp: "2026-01-01T00:00:01.000Z", message: { role: "assistant", content: "hi", timestamp: 2 } },
+] as unknown as SessionEntry[];
+
+function beforeCompact(signal: AbortSignal = new AbortController().signal) {
+  return {
+    type: "session_before_compact",
+    preparation: { firstKeptEntryId: "e2", messagesToSummarize: [], turnPrefixMessages: [], isSplitTurn: false, tokensBefore: 100, fileOps: { readFiles: [], modifiedFiles: [] }, settings: { enabled: true, reserveTokens: 1, keepRecentTokens: 1 } },
+    branchEntries: branch,
+    reason: "manual",
+    willRetry: false,
+    signal,
+  };
+}
+
+const SUMMARISER_FAILED = "pi-lcm: summariser failed; compaction skipped, will retry after more growth";
+
+describe("summariser failure", () => {
+  it("a_triggered_compaction_is_cancelled_so_pi_does_not_use_the_main_model", async () => {
+    const { fake, compactCalls, notifications, settle } = await boot({ trigger: "40%", hasUI: true, branch, tokens: () => 450_000, completeError: new Error("provider down") });
+    await settle();
+    expect(compactCalls).toHaveLength(1);
+    const result = await fake.emit("session_before_compact", beforeCompact());
+    expect(result).toEqual({ cancel: true });
+    expect(notifications.filter((m) => m === SUMMARISER_FAILED)).toHaveLength(1);
+    compactCalls[0]!.onError!(new Error("Compaction cancelled"));
+    await settle();
+    expect(compactCalls).toHaveLength(1);
+  });
+
+  it("a_triggered_cancel_without_a_ui_notifies_nothing", async () => {
+    const { fake, notifications, settle } = await boot({ trigger: "40%", hasUI: false, branch, tokens: () => 450_000, completeError: new Error("provider down") });
+    await settle();
+    expect(await fake.emit("session_before_compact", beforeCompact())).toEqual({ cancel: true });
+    expect(notifications).toEqual([]);
+  });
+
+  it("a_user_started_compaction_keeps_pi_default_fallback", async () => {
+    const { fake, notifications } = await boot({ trigger: "40%", hasUI: true, branch, tokens: () => 450_000, completeError: new Error("provider down") });
+    expect(await fake.emit("session_before_compact", beforeCompact())).toBeUndefined();
+    expect(notifications).toEqual([]);
+  });
+
+  it("a_triggered_compaction_that_was_aborted_is_not_reported_as_a_summariser_failure", async () => {
+    const { fake, notifications, settle } = await boot({ trigger: "40%", hasUI: true, branch, tokens: () => 450_000, completeError: new Error("provider down") });
+    await settle();
+    const controller = new AbortController();
+    controller.abort();
+    expect(await fake.emit("session_before_compact", beforeCompact(controller.signal))).toBeUndefined();
+    expect(notifications.filter((m) => m === SUMMARISER_FAILED)).toHaveLength(0);
+  });
+
+  it("a_working_summariser_still_returns_the_compaction_for_a_triggered_run", async () => {
+    const { fake, settle } = await boot({ trigger: "40%", hasUI: true, branch, tokens: () => 450_000 });
+    await settle();
+    expect(await fake.emit("session_before_compact", beforeCompact())).toMatchObject({ compaction: { summary: expect.stringContaining("<lcm-context") } });
+  });
+});
+
+describe("any successful compaction clears the trigger bookkeeping", () => {
+  const piCompacted = { type: "session_compact", compactionEntry: { id: "c1", summary: "s", firstKeptEntryId: "e2" }, fromExtension: true };
+
+  it("clears_a_recorded_failure", async () => {
+    const { fake, compactCalls, settle } = await boot({ trigger: "40%", tokens: () => 450_000 });
+    await settle();
+    compactCalls[0]!.onError!(new Error("fail"));
+    await settle();
+    expect(compactCalls).toHaveLength(1);
+    await fake.emit("session_compact", piCompacted);
+    await settle();
+    expect(compactCalls).toHaveLength(2);
+  });
+
+  it("clears_the_just_compacted_flag", async () => {
+    const { fake, compactCalls, settle } = await boot({ trigger: "40%", tokens: () => 450_000 });
+    await settle();
+    compactCalls[0]!.onComplete!({});
+    await fake.emit("session_compact", piCompacted);
+    await settle();
+    expect(compactCalls).toHaveLength(2);
+  });
+
+  it("our_own_triggered_compaction_still_sets_just_compacted_after_the_event", async () => {
+    const { fake, compactCalls, settle } = await boot({ trigger: "40%", tokens: () => 450_000 });
+    await settle();
+    await fake.emit("session_compact", piCompacted);
+    compactCalls[0]!.onComplete!({});
+    await settle();
+    expect(compactCalls).toHaveLength(1);
   });
 });

@@ -445,6 +445,15 @@ describe("summariser failure", () => {
     expect(notifications.filter((m) => m === SUMMARISER_FAILED)).toHaveLength(0);
   });
 
+  it("an_aborted_triggered_compaction_clears_the_request_so_the_next_compaction_keeps_pi_fallback", async () => {
+    const { fake, settle } = await boot({ trigger: "40%", hasUI: true, branch, tokens: () => 450_000, completeError: new Error("provider down") });
+    await settle();
+    const controller = new AbortController();
+    controller.abort();
+    expect(await fake.emit("session_before_compact", beforeCompact(controller.signal))).toBeUndefined();
+    expect(await fake.emit("session_before_compact", beforeCompact())).toBeUndefined();
+  });
+
   it("a_working_summariser_still_returns_the_compaction_for_a_triggered_run", async () => {
     const { fake, settle } = await boot({ trigger: "40%", hasUI: true, branch, tokens: () => 450_000 });
     await settle();

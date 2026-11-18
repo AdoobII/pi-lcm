@@ -667,7 +667,12 @@ async function handleSessionTree(event: SessionTreeEvent, ctx: ExtensionContext)
 // Returning undefined for a compaction pi-lcm triggered would make Pi fall back to its default compaction on the main model.
 // Cancelling makes Pi call onError, which records the failure and backs off. Other compactions keep Pi's fallback.
 function cancelTriggeredCompaction(ctx: ExtensionContext, signal: AbortSignal): { cancel: true } | undefined {
-  if (!state.compactRequested || signal.aborted) {
+  if (!state.compactRequested) {
+    return undefined;
+  }
+  if (signal.aborted) {
+    // A user /compact aborted the triggered compaction. Clear the request so the next compaction keeps Pi's fallback.
+    state.compactRequested = false;
     return undefined;
   }
   if (ctx.hasUI) {

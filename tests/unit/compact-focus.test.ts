@@ -43,6 +43,13 @@ describe("buildFocus", () => {
     expect(buildFocus("only user", "")).toBe("only user");
   });
 
+  it("build_focus_non_string_config_uses_default_keep_list", () => {
+    for (const bad of [undefined, null, 42, ["x"], {}]) {
+      expect(buildFocus(undefined, bad as unknown as string)).toBe(DEFAULT_COMPACTION_FOCUS);
+      expect(buildFocus("user", bad as unknown as string)).toBe(`user\n\n${DEFAULT_COMPACTION_FOCUS}`);
+    }
+  });
+
   it("default_focus_names_the_things_worth_keeping", () => {
     expect(DEFAULT_CONFIG.compactionFocus).toBe(DEFAULT_COMPACTION_FOCUS);
     for (const word of ["decisions", "file paths", "commit hashes", "open threads", "preferences", "re-read"]) {
@@ -129,7 +136,7 @@ describe("session_before_compact focus", () => {
     process.env.PI_LCM_DB_PATH = ":memory:";
     process.env.PI_LCM_MODEL = "test/test-model";
     restore = () => {
-      process.env.HOME = previous.HOME;
+      if (previous.HOME === undefined) delete process.env.HOME; else process.env.HOME = previous.HOME;
       if (previous.model === undefined) delete process.env.PI_LCM_MODEL; else process.env.PI_LCM_MODEL = previous.model;
       if (previous.db === undefined) delete process.env.PI_LCM_DB_PATH; else process.env.PI_LCM_DB_PATH = previous.db;
     };

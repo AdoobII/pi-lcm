@@ -19,15 +19,15 @@ On first activation, pi-lcm has no summarizer model configured. You must choose 
 - Use the model picker: run `/lcm-model` and select from available models.
 - Or set `PI_LCM_MODEL` in your environment.
 
-After the model, an interactive first run asks when compaction should start: a percent of the context window (40% is suggested), a token count, or Off. The choice is saved as `compactionTrigger` in `~/.pi/agent/lcm.json`. pi-lcm also prints the matching Pi `reserveTokens` value for each context window, which you can add to Pi's `settings.json` by hand. Run `/lcm-trigger` to choose again. `PI_LCM_COMPACT_TRIGGER` skips the prompt and overrides the saved choice. So does a `compactionTrigger` in a trusted project's `.pi/lcm.json`. In both cases `/lcm-trigger` still saves the global value and warns that the override wins. Without a UI (print or JSON mode) pi-lcm does not prompt.
+After the model, an interactive first run asks when compaction should start: a percent of the context window (40% is suggested), a token count, or Off. The choice is saved as `compactionTrigger` in `~/.pi/agent/lcm.json`. Run `/lcm-trigger` to choose again. A valid `PI_LCM_COMPACT_TRIGGER` skips the prompt and overrides the saved choice. So does a `compactionTrigger` in a trusted project's `.pi/lcm.json`. In both cases `/lcm-trigger` still saves the global value and warns that the override wins. A `PI_LCM_COMPACT_TRIGGER` that does not parse (for example `40` without a unit) is ignored: pi-lcm warns once at session start and uses the project or saved choice, or asks as if the variable were unset.
 
-The first-run prompt is a dialog. In RPC clients it blocks session start until the client answers, so RPC users should set `PI_LCM_COMPACT_TRIGGER` or save the choice once interactively. Cancelling the prompt saves nothing and asks again next session. If `~/.pi/agent/lcm.json` exists but is not valid JSON, pi-lcm leaves it untouched and the choice applies for that session only.
+The first-run dialogs (the trigger prompt and the summarizer model picker) appear only in the interactive terminal UI. RPC, print and JSON sessions never prompt: A dialog there would hang the session, because Pi's RPC mode cannot deliver the client's answer during session start. In those modes pi-lcm logs one warning and carries on. Set `PI_LCM_COMPACT_TRIGGER` (and `PI_LCM_MODEL`), or choose once in an interactive session, which saves the choice to `~/.pi/agent/lcm.json`. The `/lcm-trigger` and `/lcm-model` commands work wherever you run them. Cancelling the prompt saves nothing and asks again next session. If `~/.pi/agent/lcm.json` exists but is not valid JSON, pi-lcm leaves it untouched and the choice applies for that session only. If the file cannot be read (for example a permissions error) you get a separate "could not read lcm.json" notice and the file is also left alone.
 
 Until a model is chosen, pi-lcm **will not perform summarization**. It will still persist messages and fall back to Pi's default compaction. In print mode and JSON mode, if no model is chosen, pi-lcm skips all compaction work entirely.
 
 ## Configuration
 
-Configuration is loaded from three sources in order (later overrides earlier):
+Configuration is loaded from three sources in order (later overrides earlier), so for every key the precedence is environment variable, then trusted project config, then global config, then the default:
 
 1. **Global config**: `~/.pi/agent/lcm.json`
 2. **Project config**: `<project>/.pi/lcm.json` (only when the project is trusted)
@@ -51,8 +51,8 @@ All keys and their defaults:
 | `recallThreshold` | `0.35` | Minimum BM25 score for memory recall. |
 | `autoMemories` | `true` | Whether to automatically extract and store memories. |
 | `storeThinking` | `false` | Whether to store thinking blocks. Disabled by default for privacy. |
-| `compactionFocus` | list of decisions, file paths, commit hashes, open threads, preferences and ledger or plan paths | Instructions sent to the summarizer for leaf and condensed summaries, after any `/compact` instructions. Set to `""` to send none. A non-string value is ignored. |
-| `compactionTrigger` | `null` | When compaction starts, as `{"mode": "percent", "value": 40}` (share of the context window, 5 to 90), `{"mode": "tokens", "value": 400000}` (token count, at least 20000 and below the model's window) or `{"mode": "off", "value": 0}`. `null` means no trigger has been chosen. Invalid values are ignored. `PI_LCM_COMPACT_TRIGGER` overrides it and accepts `40%`, `400k`, `400000`, `1.5m` or `off`. |
+| `compactionFocus` | list of decisions, file paths, commit hashes, open threads, preferences, test and build commands with their last results, the current branch or worktree, exact error messages, and ledger or plan paths | Instructions sent to the summarizer for leaf and condensed summaries, after any `/compact` instructions. Set to `""` to send none. A non-string value is ignored. |
+| `compactionTrigger` | `null` | When compaction starts, as `{"mode": "percent", "value": 40}` (share of the context window, 5 to 90), `{"mode": "tokens", "value": 400000}` (token count, at least 20000 and below the model's window) or `{"mode": "off", "value": 0}`. `null` means no trigger has been chosen. Invalid values are ignored. `PI_LCM_COMPACT_TRIGGER` overrides it and accepts `40%`, `400k`, `400000`, `1.5m` or `off`. The effective threshold has a floor, see [Automatic compaction trigger](#automatic-compaction-trigger). |
 | `debug` | `false` | Enable verbose logging. |
 
 Example `~/.pi/agent/lcm.json`:
@@ -70,9 +70,19 @@ Example `~/.pi/agent/lcm.json`:
 
 With a `compactionTrigger` set, pi-lcm compacts on its own once a run has settled and usage reaches the threshold. It waits one second after the run settles and skips the check if a new prompt or run started in that time.
 
-- Print, json and SDK sessions never auto-compact.
-- RPC sessions auto-compact only when `PI_LCM_TRIGGER_IN_RPC=1` is set (environment variable only, off by default). The client must wait for `compaction_end`, or check `isCompacting` in `get_state`, before sending its next prompt, because a prompt sent during compaction is rejected. Set the variable only on the process you control: child processes inherit the environment, and any RPC-mode child would also auto-compact.
-- Interactive (TUI) sessions auto-compact whenever a trigger is set.
+Limits the trigger enforces:
+
+- **Floor.** The effective threshold is the larger of the configured trigger and 2 x Pi's `compaction.keepRecentTokens` (default 20000). With the default, "at least 20000 tokens" therefore behaves as 40000, and a context window of 40000 tokens or less never triggers.
+- **Summarizer model.** A pi-lcm summarizer model must be configured. Without one the trigger never fires.
+- **Below the window.** The threshold must be below the model's context window, or the trigger never fires. The prompt rejects a token trigger at or above every window it knows about.
+- **Backoff.** After a failed compaction, or a compaction that leaves usage above the trigger, pi-lcm waits until usage has grown by 10% of the context window before it tries again. Any successful compaction, including Pi's own and `/compact`, clears the backoff.
+- **Summarizer failure.** If pi-lcm's summarizer fails during a compaction it triggered, pi-lcm cancels that compaction, so Pi does not fall back to its default compaction on your main model. It then backs off as above and, with a UI, says so once. Compactions you start with `/compact` and Pi's own threshold compactions keep Pi's fallback.
+- **Print, json and SDK sessions** never auto-compact.
+- **RPC sessions** auto-compact only when `PI_LCM_TRIGGER_IN_RPC=1` is set (environment variable only, off by default). The client must wait for `compaction_end`, or check `isCompacting` in `get_state`, before sending its next prompt, because a prompt sent during compaction is rejected. Set the variable only on a process you control, because child processes inherit it and any RPC-mode child would also auto-compact.
+- **Interactive (TUI) sessions** auto-compact whenever a trigger is set.
+- **Remaining race.** If another extension's `agent_settled` handler stays busy for more than one second and then sends a prompt, that prompt is rejected while compaction runs. The TUI queues anything you type during a compaction.
+
+After you choose a trigger, pi-lcm prints the matching Pi `reserveTokens` values for up to three of your models (the three with the largest windows, then "and N more"), as `compaction.modelOverrides["provider/id"].reserveTokens`. This keeps Pi's own threshold in line with the trigger as a backstop. A single global `compaction.reserveTokens` applies to every model, so it is safe only at the value for your smallest context window, which the hint also shows. A larger global value makes Pi compact after every turn on a smaller model.
 
 ## Tools
 

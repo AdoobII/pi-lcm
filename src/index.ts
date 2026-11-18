@@ -12,6 +12,7 @@ import { resolveDbPath, ensureDbDirectory } from "./db/path.js";
 import { compactSpan, CompactionDeps, CompactionSpan, CompactionOutcome } from "./compact/engine.js";
 import { createSummarizer, resolveModel as resolvePiModel, NoModelError } from "./compact/summarizer.js";
 import { buildFocus } from "./compact/prompts.js";
+import { shouldCompact } from "./trigger-runtime.js";
 import { createRecallState, buildRestoreBlock, buildPromptBlock } from "./recall/inject.js";
 import { registerTools, ToolDeps } from "./tools/index.js";
 import { loadConfig, saveModelChoice, DEFAULT_CONFIG } from "./config.js";
@@ -22,6 +23,10 @@ import type { LcmConfig, StoredMessage } from "./types.js";
 
 // State is per-extension-instance, managed by the factory
 let state: ExtensionState;
+let extensionApi: ExtensionAPI | null = null;
+// Changes on every session start so a compaction callback from a different session cannot alter the current session's trigger state.
+let triggerEpoch = 0;
+const DEFAULT_KEEP_RECENT_TOKENS = 20000;
 
 function getState(): ExtensionState {
   return state;
@@ -267,6 +272,9 @@ async function handleSessionStart(event: { type: string; reason: string }, ctx: 
   
   try {
     logDebug("session_start: starting");
+    triggerEpoch++;
+    state.compactRequested = false;
+    state.lastFailure = null;
     
     // Resolve project root and id
     const cwd = ctx.sessionManager.getCwd();
@@ -387,6 +395,68 @@ async function handleAgentSettled(event: unknown, ctx: ExtensionContext): Promis
     await syncMessages(ctx, state);
   } catch (error) {
     logError(`agent_settled sync failed: ${error}`);
+  }
+
+  try {
+    evaluateCompactionTrigger(ctx);
+  } catch (error) {
+    logError(`agent_settled trigger failed: ${error}`);
+  }
+}
+
+function readKeepRecentTokens(): number {
+  const keep = extensionApi?.getSettings?.().compaction?.keepRecentTokens;
+  return typeof keep === "number" && Number.isFinite(keep) && keep >= 0 ? keep : DEFAULT_KEEP_RECENT_TOKENS;
+}
+
+function evaluateCompactionTrigger(ctx: ExtensionContext): void {
+  if (state.compactRequested) {
+    return;
+  }
+  const usage = ctx.getContextUsage();
+  const decision = shouldCompact({
+    usage,
+    trigger: state.config.compactionTrigger ?? null,
+    keepRecentTokens: readKeepRecentTokens(),
+    hasModel: state.model !== null,
+    isCompacting: state.isCompacting,
+    lastFailure: state.lastFailure,
+  });
+  if (!decision.compact || !usage || usage.tokens === null) {
+    return;
+  }
+
+  const tokens = usage.tokens;
+  const epoch = triggerEpoch;
+  state.compactRequested = true;
+  try {
+    ctx.compact({
+      customInstructions: buildFocus(undefined, state.config.compactionFocus),
+      onComplete: () => {
+        if (epoch !== triggerEpoch) return;
+        state.compactRequested = false;
+        state.lastFailure = null;
+      },
+      onError: (error) => {
+        logWarn(`pi-lcm: triggered compaction failed: ${error}`);
+        if (epoch !== triggerEpoch) return;
+        state.compactRequested = false;
+        state.lastFailure = { tokens };
+      },
+    });
+  } catch (error) {
+    logError(`pi-lcm: could not start compaction: ${error}`);
+    state.compactRequested = false;
+    state.lastFailure = { tokens };
+    return;
+  }
+
+  if (ctx.hasUI) {
+    try {
+      ctx.ui.notify(`pi-lcm: compacting at ${tokens} of ${usage.contextWindow} tokens (threshold ${decision.thresholdTokens})`);
+    } catch (error) {
+      logDebug(`trigger notify failed: ${error}`);
+    }
   }
 }
 
@@ -722,6 +792,7 @@ function handleLcmRecallConfigEvent(data: unknown): void {
 export default async function (pi: ExtensionAPI): Promise<void> {
   // Initialize fresh state for this extension instance
   state = createExtensionState();
+  extensionApi = pi;
   
   // Set up ToolDeps getters that read live state
   const toolDeps: ToolDeps = {

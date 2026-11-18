@@ -13,6 +13,8 @@ export interface ExtensionState {
   sessionId: string | null;
   lastSyncedEntryId: string | null;
   isCompacting: boolean;
+  compactRequested: boolean;
+  lastFailure: { tokens: number } | null;
   recall: RecallState;
   modelChoice: string | null;
   model: PiModel<Api> | null;
@@ -30,6 +32,8 @@ export function createExtensionState(): ExtensionState {
     sessionId: null,
     lastSyncedEntryId: null,
     isCompacting: false,
+    compactRequested: false,
+    lastFailure: null,
     recall: createRecallState(),
     modelChoice: null,
     model: null,

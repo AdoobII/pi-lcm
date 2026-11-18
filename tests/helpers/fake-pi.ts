@@ -8,11 +8,16 @@ interface FakePiOptions {
   selectResult?: string;
   completeText?: string;
   completeError?: Error;
+  getContextUsage?: () => unknown;
+  compact?: (options: { customInstructions?: string; onComplete?: (result: unknown) => void; onError?: (error: Error) => void }) => void;
+  settings?: unknown;
+  notify?: (message: string, level?: string) => void;
 }
 
 interface FakePi {
   api: ExtensionAPI;
   emit: <T, R>(event: string, payload: T) => Promise<R | undefined>;
+  emitStrict: <T>(event: string, payload: T) => Promise<void>;
   emitBus: (channel: string, data: unknown) => void;
   tools: Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>;
   commands: Map<string, { handler: (ctx: ExtensionContext) => Promise<void> }>;
@@ -85,7 +90,7 @@ function createFakeUIContext(fakeOptions: FakePiOptions): unknown {
     select: async (title: string, selectOptions: string[]) => fakeOptions.selectResult,
     confirm: async () => true,
     input: async () => undefined,
-    notify: () => {},
+    notify: (message: string, level?: string) => fakeOptions.notify?.(message, level),
     setStatus: () => {},
     setWorkingMessage: () => {},
     setWorkingVisible: () => {},
@@ -130,7 +135,8 @@ function createFakeContext(cwd: string, branch: SessionEntry[], options: FakePiO
     sessionManager,
     ui,
     isProjectTrusted: () => true,
-    getContextUsage: () => ({ tokens: 0 }),
+    getContextUsage: options.getContextUsage ?? (() => ({ tokens: 0 })),
+    compact: options.compact ?? (() => {}),
   } as unknown as ExtensionContext;
 }
 
@@ -197,6 +203,7 @@ export function createFakePi(options: FakePiOptions): FakePi {
     getKeybindings: () => [],
     getFlags: () => ({}),
     getConfig: () => ({}),
+    getSettings: () => options.settings ?? {},
     events,
   } as unknown as ExtensionAPI;
 
@@ -220,6 +227,12 @@ export function createFakePi(options: FakePiOptions): FakePi {
     return result;
   };
 
+  const emitStrict = async <T>(event: string, payload: T): Promise<void> => {
+    for (const handler of handlers.get(event) ?? []) {
+      await Promise.resolve(handler(payload, context));
+    }
+  };
+
   const setBranch = (entries: SessionEntry[]) => {
     currentBranch = entries;
     (context.sessionManager as unknown as { setBranch: (entries: SessionEntry[]) => void }).setBranch(entries);
@@ -228,6 +241,7 @@ export function createFakePi(options: FakePiOptions): FakePi {
   return {
     api,
     emit,
+    emitStrict,
     emitBus: events.emit,
     tools,
     commands,

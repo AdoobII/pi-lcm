@@ -9,6 +9,9 @@ interface FakePiOptions {
   hasPendingMessages?: () => boolean;
   branch?: SessionEntry[];
   selectResult?: string;
+  select?: (title: string, options: string[]) => Promise<string | undefined>;
+  input?: (title: string, placeholder?: string) => Promise<string | undefined>;
+  extraModelWindows?: number[];
   completeText?: string;
   completeError?: Error;
   getContextUsage?: () => unknown;
@@ -23,7 +26,7 @@ interface FakePi {
   emitStrict: <T>(event: string, payload: T) => Promise<void>;
   emitBus: (channel: string, data: unknown) => void;
   tools: Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>;
-  commands: Map<string, { handler: (ctx: ExtensionContext) => Promise<void> }>;
+  commands: Map<string, { handler: (args: string, ctx: ExtensionContext) => Promise<void> }>;
   context: ExtensionContext;
   setBranch: (entries: SessionEntry[]) => void;
 }
@@ -39,7 +42,10 @@ function createFakeModelRegistry(options: FakePiOptions): ModelRegistry {
   } as unknown as PiModel<Api>;
 
   return {
-    getAvailable: () => [testModel],
+    getAvailable: () => [
+      testModel,
+      ...(options.extraModelWindows ?? []).map((contextWindow, index) => ({ id: `extra-${index}`, provider: "test", contextWindow, maxTokens: 4096 }) as unknown as PiModel<Api>),
+    ],
     find: (provider: string, id: string) => {
       if (provider === "test" && id === "test-model") {
         return testModel as unknown as PiModel<Api>;
@@ -90,9 +96,9 @@ function createFakeSessionManager(cwd: string, branch: SessionEntry[]): SessionM
 
 function createFakeUIContext(fakeOptions: FakePiOptions): unknown {
   return {
-    select: async (title: string, selectOptions: string[]) => fakeOptions.selectResult,
+    select: async (title: string, selectOptions: string[]) => (fakeOptions.select ? fakeOptions.select(title, selectOptions) : fakeOptions.selectResult),
     confirm: async () => true,
-    input: async () => undefined,
+    input: async (title: string, placeholder?: string) => fakeOptions.input?.(title, placeholder),
     notify: (message: string, level?: string) => fakeOptions.notify?.(message, level),
     setStatus: () => {},
     setWorkingMessage: () => {},
@@ -152,7 +158,7 @@ export function createFakePi(options: FakePiOptions): FakePi {
 
   const handlers = new Map<string, ((event: unknown, ctx: ExtensionContext) => Promise<unknown> | unknown)[]>();
   const tools = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
-  const commands = new Map<string, { handler: (ctx: ExtensionContext) => Promise<void> }>();
+  const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => Promise<void> }>();
 
   let currentBranch = branch;
 
@@ -186,8 +192,8 @@ export function createFakePi(options: FakePiOptions): FakePi {
     registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) => {
       tools.set(tool.name, tool as { execute: (...args: unknown[]) => Promise<unknown> });
     },
-    registerCommand: (name: string, options: { handler: (ctx: ExtensionContext) => Promise<void> }) => {
-      commands.set(name, options as { handler: (ctx: ExtensionContext) => Promise<void> });
+    registerCommand: (name: string, options: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => {
+      commands.set(name, options);
     },
     registerMcpServer: () => {},
     registerVirtualModel: () => {},

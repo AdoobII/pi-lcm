@@ -15,7 +15,9 @@ import { buildFocus } from "./compact/prompts.js";
 import { shouldCompact } from "./trigger-runtime.js";
 import { createRecallState, buildRestoreBlock, buildPromptBlock } from "./recall/inject.js";
 import { registerTools, ToolDeps } from "./tools/index.js";
-import { loadConfig, saveModelChoice, DEFAULT_CONFIG } from "./config.js";
+import { loadConfig, saveModelChoice, saveTriggerChoice, configPaths, DEFAULT_CONFIG } from "./config.js";
+import { askTrigger } from "./trigger-prompt.js";
+import { DEFAULT_KEEP_RECENT_TOKENS, type CompactionTrigger } from "./trigger.js";
 import { createExtensionState, ExtensionState } from "./state.js";
 import { logError, logWarn, logDebug } from "./util/log.js";
 import { estimateTokens } from "./util/tokens.js";
@@ -26,7 +28,6 @@ let state: ExtensionState;
 let extensionApi: ExtensionAPI | null = null;
 // Changes on every session start so a compaction callback from a different session cannot alter the current session's trigger state.
 let triggerEpoch = 0;
-const DEFAULT_KEEP_RECENT_TOKENS = 20000;
 
 function getState(): ExtensionState {
   return state;
@@ -353,6 +354,8 @@ async function handleSessionStart(event: { type: string; reason: string }, ctx: 
     const model = resolveModel(ctx, state.config);
     state.model = model;
     
+    await runFirstTriggerPrompt(ctx);
+
     if (choice && !model) {
       logWarn(`pi-lcm: configured summarizer model ${choice} is unavailable; skipping pi-lcm compaction`);
     }
@@ -373,6 +376,61 @@ async function handleSessionStart(event: { type: string; reason: string }, ctx: 
       logError(`session_start failed: ${error}`);
       // Don't disable on other errors during startup
     }
+  }
+}
+
+// Pi's reserveTokens hint is per context window, so collect the windows of every model the user can pick.
+function collectContextWindows(ctx: ExtensionContext): number[] {
+  const windows: number[] = [];
+  try {
+    for (const model of ctx.modelRegistry.getAvailable()) {
+      windows.push(model.contextWindow);
+    }
+  } catch (error) {
+    logDebug(`collectContextWindows failed: ${error}`);
+  }
+  if (windows.length === 0 && ctx.model) {
+    windows.push(ctx.model.contextWindow);
+  }
+  return windows.filter((window) => Number.isFinite(window) && window > 0);
+}
+
+function isTriggerEnvOverridden(): boolean {
+  return process.env.PI_LCM_COMPACT_TRIGGER !== undefined;
+}
+
+async function promptAndSaveTrigger(ctx: ExtensionContext): Promise<CompactionTrigger | undefined> {
+  const trigger = await askTrigger(ctx, collectContextWindows(ctx), readKeepRecentTokens());
+  if (!trigger) {
+    return undefined;
+  }
+  if (!saveTriggerChoice(trigger)) {
+    ctx.ui.notify(`pi-lcm: could not save the trigger choice to ${configPaths("").global}; it applies for this session only`, "warning");
+  }
+  if (!isTriggerEnvOverridden()) {
+    state.config = { ...state.config, compactionTrigger: trigger };
+    state.lastFailure = null;
+  }
+  return trigger;
+}
+
+function describeTrigger(trigger: CompactionTrigger): string {
+  if (trigger.mode === "percent") return `${trigger.value}% of the context window`;
+  if (trigger.mode === "tokens") return `${trigger.value} tokens`;
+  return "off (Pi's own threshold only)";
+}
+
+async function runFirstTriggerPrompt(ctx: ExtensionContext): Promise<void> {
+  if (state.config.compactionTrigger !== null || isTriggerEnvOverridden()) {
+    return;
+  }
+  if (!ctx.hasUI) {
+    logWarn("pi-lcm: no compaction trigger chosen; run /lcm-trigger in an interactive session to choose one");
+    return;
+  }
+  const trigger = await promptAndSaveTrigger(ctx);
+  if (trigger) {
+    ctx.ui.notify(`pi-lcm: compaction trigger set to ${describeTrigger(trigger)}`);
   }
 }
 
@@ -815,6 +873,30 @@ async function handleLcmModelCommand(_args: string, ctx: ExtensionCommandContext
   }
 }
 
+async function handleLcmTriggerCommand(_args: string, ctx: ExtensionCommandContext): Promise<void> {
+  if (state.disabled) {
+    return;
+  }
+
+  try {
+    if (!ctx.hasUI) {
+      return;
+    }
+    const trigger = await promptAndSaveTrigger(ctx);
+    if (!trigger) {
+      ctx.ui.notify("pi-lcm: compaction trigger unchanged");
+      return;
+    }
+    if (isTriggerEnvOverridden()) {
+      ctx.ui.notify(`pi-lcm: saved ${describeTrigger(trigger)}, but PI_LCM_COMPACT_TRIGGER overrides the saved choice while it is set`, "warning");
+      return;
+    }
+    ctx.ui.notify(`pi-lcm: compaction trigger set to ${describeTrigger(trigger)}`);
+  } catch (error) {
+    logError(`lcm-trigger command failed: ${error}`);
+  }
+}
+
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
@@ -903,5 +985,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   pi.registerCommand("lcm-model", {
     description: "Select the summarizer model for pi-lcm compaction",
     handler: handleLcmModelCommand,
+  });
+  pi.registerCommand("lcm-trigger", {
+    description: "Choose when pi-lcm starts compaction (percent of the context window, a token count, or off)",
+    handler: handleLcmTriggerCommand,
   });
 }

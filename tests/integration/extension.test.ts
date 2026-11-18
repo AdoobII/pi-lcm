@@ -223,6 +223,6 @@ describe("extension", () => {
     const fake = await boot({ branch: [], hasUI: true, selectResult: "test/test-model" });
     const command = fake.commands.get("lcm-model");
     expect(command).toBeDefined();
-    await command!.handler(fake.context);
+    await command!.handler("", fake.context);
   });
 });

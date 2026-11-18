@@ -1,6 +1,6 @@
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { homedir } from "os";
-import { dirname, join } from "path";
+import { dirname, join, resolve } from "path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_COMPACTION_FOCUS } from "./compact/prompts.js";
 import { parseTriggerInput, sanitizeTrigger, type CompactionTrigger } from "./trigger.js";
@@ -95,21 +95,60 @@ export function loadConfig(opts: { projectRoot: string; env: NodeJS.ProcessEnv; 
   return config as LcmConfig;
 }
 
-// Writes the global lcm.json through a temp file in the same directory so a crash or a full disk cannot leave a half-written file.
-function updateGlobalConfig(changes: Partial<LcmConfig>): boolean {
-  const path = configPaths("").global;
-  const tempPath = `${path}.${process.pid}.tmp`;
+type RawConfigRead = { exists: false } | { exists: true; file: Record<string, unknown> | null };
+
+// Reads the file unsanitised so a save keeps every key. The file field is null when the content is not a JSON object.
+function readRawConfigFile(path: string): RawConfigRead {
+  if (!existsSync(path)) return { exists: false };
   try {
-    const existing = readConfigFile(path) ?? {};
-    mkdirSync(dirname(path), { recursive: true });
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { exists: true, file: null };
+    return { exists: true, file: parsed as Record<string, unknown> };
+  } catch {
+    return { exists: true, file: null };
+  }
+}
+
+export function globalConfigIsUnparseable(): boolean {
+  const read = readRawConfigFile(configPaths("").global);
+  return read.exists && read.file === null;
+}
+
+// Writes go to the real target so a symlinked lcm.json stays a link.
+function resolveWriteTarget(path: string): string {
+  try {
+    if (!lstatSync(path).isSymbolicLink()) return path;
+  } catch {
+    return path;
+  }
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(dirname(path), readlinkSync(path));
+  }
+}
+
+// Writes through a temp file so a crash or full disk cannot leave a half-written file.
+// An existing file that is not a JSON object is left alone, because rewriting it would lose its contents.
+function updateGlobalConfig(changes: Partial<LcmConfig>): boolean {
+  let tempPath: string | null = null;
+  try {
+    const target = resolveWriteTarget(configPaths("").global);
+    const read = readRawConfigFile(target);
+    if (read.exists && read.file === null) return false;
+    const existing = read.exists ? read.file : {};
+    mkdirSync(dirname(target), { recursive: true });
+    tempPath = `${target}.${process.pid}.tmp`;
     writeFileSync(tempPath, JSON.stringify({ ...existing, ...changes }, null, 2));
-    renameSync(tempPath, path);
+    if (read.exists) chmodSync(tempPath, statSync(target).mode & 0o777);
+    renameSync(tempPath, target);
     return true;
   } catch {
-    try {
-      rmSync(tempPath, { force: true });
-    } catch {
-      // Ignore cleanup failure.
+    if (tempPath !== null) {
+      try {
+        rmSync(tempPath, { force: true });
+      } catch {
+      }
     }
     return false;
   }

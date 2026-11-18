@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_CONFIG, loadConfig, saveModelChoice, saveTriggerChoice } from "../../src/config.js";
+import { DEFAULT_CONFIG, globalConfigIsUnparseable, loadConfig, saveModelChoice, saveTriggerChoice } from "../../src/config.js";
 import { DEFAULT_COMPACTION_FOCUS } from "../../src/compact/prompts.js";
 
 let home: string;
@@ -38,6 +38,8 @@ beforeEach(() => {
 afterEach(() => {
   if (previousHome === undefined) delete process.env.HOME;
   else process.env.HOME = previousHome;
+  rmSync(home, { recursive: true, force: true });
+  rmSync(projectRoot, { recursive: true, force: true });
 });
 
 describe("compactionTrigger config", () => {
@@ -137,6 +139,54 @@ describe("compactionTrigger config", () => {
     const saved = JSON.parse(readFileSync(globalFile(), "utf-8"));
     expect(saved).toEqual({ model: "new/model", futureKey: { nested: [1, 2] }, compactionTrigger: { mode: "tokens", value: 400000 } });
     expect(readdirSync(join(home, ".pi", "agent"))).toEqual(["lcm.json"]);
+  });
+});
+
+describe("global config save safety", () => {
+  it("save_refuses_to_overwrite_an_unparseable_file", () => {
+    for (const content of ["{ not json", "[1,2]", "null", '"text"', ""]) {
+      writeGlobal(content);
+      expect(globalConfigIsUnparseable(), content).toBe(true);
+      expect(saveTriggerChoice({ mode: "percent", value: 40 }), content).toBe(false);
+      expect(saveModelChoice("a/b"), content).toBe(false);
+      expect(readFileSync(globalFile(), "utf-8"), content).toBe(content);
+    }
+    expect(readdirSync(join(home, ".pi", "agent"))).toEqual(["lcm.json"]);
+  });
+
+  it("a_missing_file_is_created_and_is_not_unparseable", () => {
+    expect(globalConfigIsUnparseable()).toBe(false);
+    expect(saveTriggerChoice({ mode: "off", value: 0 })).toBe(true);
+    expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ compactionTrigger: { mode: "off", value: 0 } });
+    expect(globalConfigIsUnparseable()).toBe(false);
+  });
+
+  it("save_keeps_every_key_verbatim_including_invalid_typed_ones", () => {
+    const original = { compactionFocus: 42, other: { a: [1] }, model: "keep/me", compactionTrigger: { mode: "percent", value: 1 } };
+    writeGlobal(original);
+    expect(saveModelChoice("new/model")).toBe(true);
+    expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ ...original, model: "new/model" });
+  });
+
+  it("save_through_a_symlink_keeps_the_link_and_updates_the_real_file", () => {
+    const realDir = mkdtempSync(join(tmpdir(), "pi-lcm-cfg-real-"));
+    const realFile = join(realDir, "dotfiles-lcm.json");
+    writeFileSync(realFile, JSON.stringify({ model: "keep/me" }));
+    rmSync(globalFile(), { force: true });
+    symlinkSync(realFile, globalFile());
+    expect(saveTriggerChoice({ mode: "percent", value: 40 })).toBe(true);
+    expect(lstatSync(globalFile()).isSymbolicLink()).toBe(true);
+    expect(JSON.parse(readFileSync(realFile, "utf-8"))).toEqual({ model: "keep/me", compactionTrigger: { mode: "percent", value: 40 } });
+    expect(readdirSync(realDir)).toEqual(["dotfiles-lcm.json"]);
+    expect(readdirSync(join(home, ".pi", "agent"))).toEqual(["lcm.json"]);
+    rmSync(realDir, { recursive: true, force: true });
+  });
+
+  it("save_preserves_the_existing_file_mode", () => {
+    writeGlobal({ model: "keep/me" });
+    chmodSync(globalFile(), 0o600);
+    expect(saveTriggerChoice({ mode: "off", value: 0 })).toBe(true);
+    expect(statSync(globalFile()).mode & 0o777).toBe(0o600);
   });
 });
 

@@ -6,6 +6,9 @@ export const DEFAULT_COMPACTION_FOCUS = [
   "- file paths and commit hashes",
   "- open threads and unfinished work",
   "- user preferences",
+  "- test and build commands, with their last results",
+  "- the current branch or worktree",
+  "- exact error messages",
   "- any ledger or plan path, with an instruction to re-read it after compaction",
 ].join("\n");
 

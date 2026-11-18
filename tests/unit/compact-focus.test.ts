@@ -57,7 +57,7 @@ describe("buildFocus", () => {
 
   it("default_focus_names_the_things_worth_keeping", () => {
     expect(DEFAULT_CONFIG.compactionFocus).toBe(DEFAULT_COMPACTION_FOCUS);
-    for (const word of ["decisions", "file paths", "commit hashes", "open threads", "preferences", "re-read"]) {
+    for (const word of ["decisions", "file paths", "commit hashes", "open threads", "preferences", "re-read", "test and build commands", "last results", "branch or worktree", "error messages"]) {
       expect(DEFAULT_COMPACTION_FOCUS).toContain(word);
     }
   });

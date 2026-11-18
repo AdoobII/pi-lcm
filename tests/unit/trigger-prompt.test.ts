@@ -70,8 +70,16 @@ describe("askTrigger", () => {
     const { ui, calls } = scriptedUi({ select: [PERCENT_OPTION], input: ["abc", "-5%", "0", "95", "40"] });
     expect(await askTrigger({ ui }, [1_000_000])).toEqual({ mode: "percent", value: 40 });
     expect(calls.inputTitles).toHaveLength(5);
-    expect(calls.inputTitles[1]).toContain("use a percent");
+    expect(calls.inputTitles[1]).toContain("enter a percent between 5 and 90, for example 40 or 40%");
+    expect(calls.inputTitles[1]).not.toContain("token count");
     expect(calls.inputTitles[4]).toContain("percent must be between");
+  });
+
+  it("non_numeric_input_at_the_token_step_says_what_the_step_accepts", async () => {
+    const { ui, calls } = scriptedUi({ select: [TOKENS_OPTION], input: ["abc", "400k"] });
+    expect(await askTrigger({ ui }, [1_000_000])).toEqual({ mode: "tokens", value: 400_000 });
+    expect(calls.inputTitles[1]).toContain("enter a token count of at least 20000 and below the window, for example 400k");
+    expect(calls.inputTitles[1]).not.toContain("percent");
   });
 
   it("input_in_the_wrong_mode_is_rejected", async () => {
@@ -87,20 +95,42 @@ describe("askTrigger", () => {
     const { ui, calls } = scriptedUi({ select: [PERCENT_OPTION], input: ["40"] });
     await askTrigger({ ui }, [1_000_000, 200_000, 1_000_000]);
     expect(calls.notifications).toEqual([
-      "For Pi's own settings.json: reserveTokens 600000 for a 1000000-token window; reserveTokens 120000 for a 200000-token window",
+      "For Pi's own settings.json compaction.reserveTokens: 600000 for a 1000000-token window; 120000 for a 200000-token window",
     ]);
   });
 
   it("reserve_tokens_hint_skips_windows_the_trigger_cannot_fit", async () => {
     const { ui, calls } = scriptedUi({ select: [TOKENS_OPTION], input: ["400k"] });
     await askTrigger({ ui }, [1_000_000, 200_000]);
-    expect(calls.notifications).toEqual(["For Pi's own settings.json: reserveTokens 600000 for a 1000000-token window"]);
+    expect(calls.notifications).toEqual(["For Pi's own settings.json compaction.reserveTokens: 600000 for a 1000000-token window"]);
   });
 
   it("reserve_tokens_hint_uses_the_keep_recent_floor", async () => {
     const { ui, calls } = scriptedUi({ select: [PERCENT_OPTION], input: ["5"] });
     await askTrigger({ ui }, [200_000], 20_000);
-    expect(calls.notifications).toEqual(["For Pi's own settings.json: reserveTokens 160000 for a 200000-token window"]);
+    expect(calls.notifications).toEqual(["For Pi's own settings.json compaction.reserveTokens: 160000 for a 200000-token window"]);
+  });
+
+  it("hint_explains_when_no_window_fits_the_token_trigger", async () => {
+    const { ui, calls } = scriptedUi({ select: [TOKENS_OPTION], input: ["900k"] });
+    await askTrigger({ ui }, [200_000, 128_000]);
+    expect(calls.notifications).toEqual([
+      "pi-lcm: compaction.reserveTokens could not be computed because no known context window fits the token trigger",
+    ]);
+  });
+
+  it("hint_collapses_to_the_three_largest_windows_plus_a_count", async () => {
+    const { ui, calls } = scriptedUi({ select: [PERCENT_OPTION], input: ["40"] });
+    await askTrigger({ ui }, [128_000, 2_000_000, 200_000, 1_000_000, 400_000, 200_000]);
+    expect(calls.notifications).toEqual([
+      "For Pi's own settings.json compaction.reserveTokens: 1200000 for a 2000000-token window; 600000 for a 1000000-token window; 240000 for a 400000-token window; and 2 more",
+    ]);
+  });
+
+  it("hint_lists_exactly_three_windows_without_a_count", async () => {
+    const { ui, calls } = scriptedUi({ select: [PERCENT_OPTION], input: ["40"] });
+    await askTrigger({ ui }, [2_000_000, 1_000_000, 400_000]);
+    expect(calls.notifications[0]).not.toContain("more");
   });
 
   it("no_hint_when_no_window_is_known", async () => {

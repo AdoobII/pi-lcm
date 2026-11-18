@@ -2,8 +2,8 @@ import { mkdtempSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import extension from "../../src/index.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import extension, { setTriggerSettleDelayMs } from "../../src/index.js";
 import { DEFAULT_COMPACTION_FOCUS } from "../../src/compact/prompts.js";
 import { createFakePi } from "../helpers/fake-pi.js";
 
@@ -11,7 +11,10 @@ type CompactOptions = { customInstructions?: string; onComplete?: (result: unkno
 
 let cleanup: (() => void) | undefined;
 
+const SETTLE_DELAY_MS = 40;
+
 afterEach(() => {
+  vi.restoreAllMocks();
   cleanup?.();
   cleanup = undefined;
 });
@@ -28,10 +31,16 @@ interface BootOptions {
   settings?: unknown;
   usageThrows?: boolean;
   compactThrows?: boolean;
+  triggerInRpc?: boolean;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Waits past the settle delay so the scheduled trigger check has run.
 function deferredTick(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
+  return sleep(SETTLE_DELAY_MS + 40);
 }
 
 async function boot(options: BootOptions = {}) {
@@ -42,14 +51,19 @@ async function boot(options: BootOptions = {}) {
     PI_LCM_MODEL: process.env.PI_LCM_MODEL,
     PI_LCM_DB_PATH: process.env.PI_LCM_DB_PATH,
     PI_LCM_COMPACT_TRIGGER: process.env.PI_LCM_COMPACT_TRIGGER,
+    PI_LCM_TRIGGER_IN_RPC: process.env.PI_LCM_TRIGGER_IN_RPC,
   };
+  setTriggerSettleDelayMs(SETTLE_DELAY_MS);
   process.env.HOME = mkdtempSync(join(tmpdir(), "pi-lcm-home-"));
   process.env.PI_LCM_DB_PATH = ":memory:";
   if (options.model === null) delete process.env.PI_LCM_MODEL;
   else process.env.PI_LCM_MODEL = options.model ?? "test/test-model";
   if (options.trigger) process.env.PI_LCM_COMPACT_TRIGGER = options.trigger;
   else delete process.env.PI_LCM_COMPACT_TRIGGER;
+  if (options.triggerInRpc) process.env.PI_LCM_TRIGGER_IN_RPC = "1";
+  else delete process.env.PI_LCM_TRIGGER_IN_RPC;
   cleanup = () => {
+    setTriggerSettleDelayMs(1000);
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -259,12 +273,101 @@ describe("agent_settled trigger", () => {
     expect(compactCalls).toHaveLength(1);
   });
 
-  it("print_json_and_rpc_modes_never_compact", async () => {
+  it("print_json_and_rpc_modes_are_skipped_by_default", async () => {
     for (const mode of ["print", "json", "rpc"] as const) {
       const run = await boot({ trigger: "40%", mode, tokens: () => 900_000 });
       await run.settle();
       expect(run.compactCalls).toHaveLength(0);
     }
+  });
+
+  it("rpc_mode_compacts_only_with_trigger_in_rpc_env", async () => {
+    const run = await boot({ trigger: "40%", mode: "rpc", triggerInRpc: true, tokens: () => 900_000 });
+    await run.settle();
+    expect(run.compactCalls).toHaveLength(1);
+  });
+
+  it("print_and_json_modes_never_compact_even_with_trigger_in_rpc_env", async () => {
+    for (const mode of ["print", "json"] as const) {
+      const run = await boot({ trigger: "40%", mode, triggerInRpc: true, tokens: () => 900_000 });
+      await run.settle();
+      expect(run.compactCalls).toHaveLength(0);
+    }
+  });
+
+  it("later_settled_handler_that_awaits_then_becomes_busy_prevents_compaction", async () => {
+    let idle = true;
+    const { fake, compactCalls, emitSettledOnly, deferredTick } = await boot({ trigger: "40%", tokens: () => 450_000, isIdle: () => idle });
+    fake.api.on("agent_settled", async () => {
+      await sleep(SETTLE_DELAY_MS / 4);
+      idle = false;
+    });
+    await emitSettledOnly();
+    await deferredTick();
+    expect(compactCalls).toHaveLength(0);
+  });
+
+  it("later_settled_handler_that_awaits_then_starts_activity_prevents_compaction", async () => {
+    for (const activity of ["input", "before_agent_start", "agent_start"]) {
+      const { fake, compactCalls, emitSettledOnly, deferredTick } = await boot({ trigger: "40%", tokens: () => 450_000 });
+      fake.api.on("agent_settled", async () => {
+        await sleep(SETTLE_DELAY_MS / 4);
+        await fake.emit(activity, { type: activity, messageType: "user", prompt: "next", text: "next" });
+      });
+      await emitSettledOnly();
+      await deferredTick();
+      expect(compactCalls, activity).toHaveLength(0);
+    }
+  });
+
+  it("activity_before_delay_elapses_skips_and_next_settle_reevaluates", async () => {
+    const { fake, compactCalls, emitSettledOnly, deferredTick, settle } = await boot({ trigger: "40%", tokens: () => 450_000 });
+    await emitSettledOnly();
+    await fake.emit("agent_start", { type: "agent_start" });
+    await deferredTick();
+    expect(compactCalls).toHaveLength(0);
+    await settle();
+    expect(compactCalls).toHaveLength(1);
+  });
+
+  it("activity_handlers_do_not_alter_pi_behaviour", async () => {
+    const { fake } = await boot({ trigger: "40%" });
+    expect(await fake.emit("input", { type: "input", text: "hi", source: "interactive" })).toBeUndefined();
+    expect(await fake.emit("agent_start", { type: "agent_start" })).toBeUndefined();
+  });
+
+  it("session_shutdown_clears_timer_and_bumps_epoch", async () => {
+    const { fake, compactCalls, emitSettledOnly, deferredTick } = await boot({ trigger: "40%", tokens: () => 450_000 });
+    await emitSettledOnly();
+    const clear = vi.spyOn(globalThis, "clearTimeout");
+    await fake.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+    expect(clear).toHaveBeenCalled();
+    await deferredTick();
+    expect(compactCalls).toHaveLength(0);
+  });
+
+  it("session_start_clears_pending_timer", async () => {
+    const { fake, emitSettledOnly } = await boot({ trigger: "40%", tokens: () => 450_000 });
+    await emitSettledOnly();
+    const clear = vi.spyOn(globalThis, "clearTimeout");
+    await fake.emit("session_start", { type: "session_start", reason: "new" });
+    expect(clear).toHaveBeenCalled();
+  });
+
+  it("trigger_timer_is_unreffed", async () => {
+    const unref = vi.fn();
+    const realSetTimeout = globalThis.setTimeout;
+    const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+      const timer = realSetTimeout(fn, ms);
+      const original = timer.unref.bind(timer);
+      timer.unref = () => { unref(); return original(); };
+      return timer;
+    }) as unknown as typeof setTimeout);
+    const { emitSettledOnly, deferredTick } = await boot({ trigger: "40%", tokens: () => 450_000 });
+    await emitSettledOnly();
+    spy.mockRestore();
+    await deferredTick();
+    expect(unref).toHaveBeenCalled();
   });
 
   it("compaction_starts_after_the_settle_emission_returns", async () => {

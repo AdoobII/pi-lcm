@@ -273,6 +273,7 @@ async function handleSessionStart(event: { type: string; reason: string }, ctx: 
   try {
     logDebug("session_start: starting");
     triggerEpoch++;
+    clearTriggerTimer();
     state.compactRequested = false;
     state.justCompacted = false;
     state.lastFailure = null;
@@ -401,25 +402,62 @@ async function handleAgentSettled(event: unknown, ctx: ExtensionContext): Promis
   scheduleCompactionTrigger(ctx);
 }
 
-// Print, json and rpc runs send their next prompt right after settle, so a compaction started then
-// would reject that prompt or race it.
-const NON_INTERACTIVE_MODES: ReadonlySet<string> = new Set(["print", "json", "rpc"]);
+// Print and json runs, and SDK sessions (which report "print"), send their next prompt right after
+// settle, so they never auto-compact. RPC sessions auto-compact only with PI_LCM_TRIGGER_IN_RPC=1.
+const NON_INTERACTIVE_MODES: ReadonlySet<string> = new Set(["print", "json"]);
 
-// Pi starts deferred prompts after the agent_settled handlers return. Checking from a timer runs
-// after they have started, so the idle and pending-message checks can see them.
+// Pi starts deferred prompts only after all agent_settled handlers return, and isIdle and
+// hasPendingMessages cannot see them. So the check waits this delay and is skipped if input,
+// before_agent_start or agent_start fired meanwhile. A later handler that stays busy longer than
+// the delay with no activity can still race the compaction.
+let triggerSettleDelayMs = 1000;
+
+export function setTriggerSettleDelayMs(ms: number): void {
+  triggerSettleDelayMs = ms;
+}
+
+function isTriggerAllowedInMode(mode: string): boolean {
+  if (mode === "rpc") {
+    return process.env.PI_LCM_TRIGGER_IN_RPC === "1";
+  }
+  return !NON_INTERACTIVE_MODES.has(mode);
+}
+
+function clearTriggerTimer(): void {
+  if (state.triggerTimer !== null) {
+    clearTimeout(state.triggerTimer);
+    state.triggerTimer = null;
+  }
+}
+
 function scheduleCompactionTrigger(ctx: ExtensionContext): void {
-  if (NON_INTERACTIVE_MODES.has(ctx.mode)) {
+  if (!isTriggerAllowedInMode(ctx.mode)) {
     return;
   }
+  clearTriggerTimer();
   const epoch = triggerEpoch;
-  setTimeout(() => {
+  const activityAtSchedule = state.activityCounter;
+  const timer = setTimeout(() => {
+    if (state.triggerTimer === timer) {
+      state.triggerTimer = null;
+    }
     try {
       if (epoch !== triggerEpoch) return;
+      if (activityAtSchedule !== state.activityCounter) return;
       evaluateCompactionTrigger(ctx);
     } catch (error) {
       logError(`agent_settled trigger failed: ${error}`);
     }
-  }, 0);
+  }, triggerSettleDelayMs);
+  if (typeof timer === "object" && typeof timer.unref === "function") {
+    timer.unref();
+  }
+  state.triggerTimer = timer;
+}
+
+function handleActivity(): undefined {
+  state.activityCounter++;
+  return undefined;
 }
 
 function readKeepRecentTokens(): number {
@@ -689,6 +727,7 @@ async function handleSessionCompact(event: {
 }
 
 async function handleBeforeAgentStart(event: BeforeAgentStartEvent, ctx: ExtensionContext): Promise<{ message: { customType: string; content: string; display: boolean } } | undefined> {
+  state.activityCounter++;
   if (state.disabled) {
     return undefined;
   }
@@ -732,6 +771,8 @@ async function handleBeforeAgentStart(event: BeforeAgentStartEvent, ctx: Extensi
 }
 
 async function handleSessionShutdown(event: { type: string }, ctx: ExtensionContext): Promise<void> {
+  triggerEpoch++;
+  clearTriggerTimer();
   if (state.disabled) {
     return;
   }
@@ -850,6 +891,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   pi.on("session_before_compact", handleSessionBeforeCompact);
   pi.on("session_compact", handleSessionCompact);
   pi.on("before_agent_start", handleBeforeAgentStart);
+  pi.on("input", handleActivity);
+  pi.on("agent_start", handleActivity);
   pi.on("session_shutdown", handleSessionShutdown);
   
   pi.events.on("lcm:store", handleLcmStoreEvent);

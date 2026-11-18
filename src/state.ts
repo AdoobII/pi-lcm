@@ -16,6 +16,8 @@ export interface ExtensionState {
   compactRequested: boolean;
   justCompacted: boolean;
   lastFailure: { tokens: number } | null;
+  activityCounter: number;
+  triggerTimer: ReturnType<typeof setTimeout> | null;
   recall: RecallState;
   modelChoice: string | null;
   model: PiModel<Api> | null;
@@ -36,6 +38,8 @@ export function createExtensionState(): ExtensionState {
     compactRequested: false,
     justCompacted: false,
     lastFailure: null,
+    activityCounter: 0,
+    triggerTimer: null,
     recall: createRecallState(),
     modelChoice: null,
     model: null,

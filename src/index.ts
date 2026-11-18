@@ -274,6 +274,7 @@ async function handleSessionStart(event: { type: string; reason: string }, ctx: 
     logDebug("session_start: starting");
     triggerEpoch++;
     state.compactRequested = false;
+    state.justCompacted = false;
     state.lastFailure = null;
     
     // Resolve project root and id
@@ -439,11 +440,27 @@ function evaluateCompactionTrigger(ctx: ExtensionContext): void {
     isCompacting: state.isCompacting,
     lastFailure: state.lastFailure,
   });
-  if (!decision.compact || !usage || usage.tokens === null) {
+  if (!usage || usage.tokens === null) {
+    return;
+  }
+  const justCompacted = state.justCompacted;
+  state.justCompacted = false;
+  if (!decision.compact) {
     return;
   }
 
   const tokens = usage.tokens;
+  if (justCompacted) {
+    state.lastFailure = { tokens };
+    if (ctx.hasUI) {
+      try {
+        ctx.ui.notify("pi-lcm: compaction left usage above the trigger; waiting for 10% more growth");
+      } catch (error) {
+        logDebug(`trigger notify failed: ${error}`);
+      }
+    }
+    return;
+  }
 
   const epoch = triggerEpoch;
   state.compactRequested = true;
@@ -453,6 +470,7 @@ function evaluateCompactionTrigger(ctx: ExtensionContext): void {
       onComplete: () => {
         if (epoch !== triggerEpoch) return;
         state.compactRequested = false;
+        state.justCompacted = true;
         state.lastFailure = null;
       },
       onError: (error) => {

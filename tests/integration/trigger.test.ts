@@ -104,7 +104,7 @@ describe("agent_settled trigger", () => {
     expect(compactCalls).toHaveLength(1);
     compactCalls[0]!.onComplete!({});
     await settle();
-    expect(compactCalls).toHaveLength(2);
+    expect(compactCalls).toHaveLength(1);
   });
 
   it("does_not_compact_without_trigger_below_threshold_or_model", async () => {
@@ -141,7 +141,7 @@ describe("agent_settled trigger", () => {
     compactCalls[1]!.onComplete!({});
     tokens = 450_000;
     await settle();
-    expect(compactCalls).toHaveLength(3);
+    expect(compactCalls).toHaveLength(2);
   });
 
   it("reads_keep_recent_tokens_from_settings", async () => {
@@ -186,6 +186,51 @@ describe("agent_settled trigger", () => {
     await fake.emit("session_start", { type: "session_start", reason: "new" });
     await settle();
     expect(compactCalls).toHaveLength(3);
+  });
+
+  it("success_below_threshold_allows_next_trigger_later", async () => {
+    let tokens = 450_000;
+    const { compactCalls, notifications, settle } = await boot({ trigger: "40%", hasUI: true, tokens: () => tokens });
+    await settle();
+    compactCalls[0]!.onComplete!({});
+    tokens = 100_000;
+    await settle();
+    expect(compactCalls).toHaveLength(1);
+    tokens = 450_000;
+    await settle();
+    expect(compactCalls).toHaveLength(2);
+    expect(notifications.filter((message) => message.includes("above the trigger"))).toHaveLength(0);
+  });
+
+  it("success_still_above_threshold_backs_off_once_and_notifies", async () => {
+    let tokens = 450_000;
+    const { compactCalls, notifications, settle } = await boot({ trigger: "40%", hasUI: true, tokens: () => tokens });
+    await settle();
+    compactCalls[0]!.onComplete!({});
+    tokens = 450_000;
+    await settle();
+    await settle();
+    expect(compactCalls).toHaveLength(1);
+    const warning = "pi-lcm: compaction left usage above the trigger; waiting for 10% more growth";
+    expect(notifications.filter((message) => message === warning)).toHaveLength(1);
+    tokens = 549_999;
+    await settle();
+    expect(compactCalls).toHaveLength(1);
+    tokens = 550_000;
+    await settle();
+    expect(compactCalls).toHaveLength(2);
+  });
+
+  it("null_usage_after_success_keeps_post_compaction_check_pending", async () => {
+    let tokens: number | null = 450_000;
+    const { compactCalls, settle } = await boot({ trigger: "40%", tokens: () => tokens });
+    await settle();
+    compactCalls[0]!.onComplete!({});
+    tokens = null;
+    await settle();
+    tokens = 450_000;
+    await settle();
+    expect(compactCalls).toHaveLength(1);
   });
 
   it("deferred_prompt_queued_at_settle_prevents_compaction", async () => {

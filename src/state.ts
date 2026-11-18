@@ -14,6 +14,7 @@ export interface ExtensionState {
   lastSyncedEntryId: string | null;
   isCompacting: boolean;
   compactRequested: boolean;
+  justCompacted: boolean;
   lastFailure: { tokens: number } | null;
   recall: RecallState;
   modelChoice: string | null;
@@ -33,6 +34,7 @@ export function createExtensionState(): ExtensionState {
     lastSyncedEntryId: null,
     isCompacting: false,
     compactRequested: false,
+    justCompacted: false,
     lastFailure: null,
     recall: createRecallState(),
     modelChoice: null,

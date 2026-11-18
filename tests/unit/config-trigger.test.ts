@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_CONFIG, compactionTriggerSource, globalConfigIsUnparseable, loadConfig, saveModelChoice, saveTriggerChoice } from "../../src/config.js";
+import { DEFAULT_CONFIG, compactionTriggerSource, globalConfigIsUnparseable, globalConfigIsUnreadable, loadConfig, parseCompactTriggerEnv, saveModelChoice, saveTriggerChoice } from "../../src/config.js";
 import { DEFAULT_COMPACTION_FOCUS } from "../../src/compact/prompts.js";
 
 let home: string;
@@ -154,6 +154,21 @@ describe("global config save safety", () => {
     expect(readdirSync(join(home, ".pi", "agent"))).toEqual(["lcm.json"]);
   });
 
+  it("an_unreadable_file_is_not_reported_as_unparseable_and_is_left_alone", () => {
+    rmSync(globalFile(), { force: true });
+    mkdirSync(globalFile());
+    expect(globalConfigIsUnparseable()).toBe(false);
+    expect(globalConfigIsUnreadable()).toBe(true);
+    expect(saveTriggerChoice({ mode: "percent", value: 40 })).toBe(false);
+    expect(lstatSync(globalFile()).isDirectory()).toBe(true);
+  });
+
+  it("only_unparseable_content_is_reported_as_unparseable", () => {
+    writeGlobal("{ not json");
+    expect(globalConfigIsUnparseable()).toBe(true);
+    expect(globalConfigIsUnreadable()).toBe(false);
+  });
+
   it("a_missing_file_is_created_and_is_not_unparseable", () => {
     expect(globalConfigIsUnparseable()).toBe(false);
     expect(saveTriggerChoice({ mode: "off", value: 0 })).toBe(true);
@@ -212,10 +227,34 @@ describe("compactionTriggerSource", () => {
     expect(source()).toBe("global");
   });
 
-  it("names_the_env_layer_whenever_the_variable_is_set", () => {
+  it("names_the_env_layer_only_when_the_variable_parses", () => {
     writeProject({ compactionTrigger: percent });
     expect(source({ PI_LCM_COMPACT_TRIGGER: "30%" })).toBe("env");
-    expect(source({ PI_LCM_COMPACT_TRIGGER: "garbage" })).toBe("env");
+    expect(source({ PI_LCM_COMPACT_TRIGGER: "off" })).toBe("env");
+    expect(source({ PI_LCM_COMPACT_TRIGGER: "garbage" })).toBe("project");
+  });
+
+  it("an_unparseable_env_value_falls_through_to_the_file_layers_like_loadConfig", () => {
+    for (const env of ["garbage", "", "40", "4%"]) {
+      expect(source({ PI_LCM_COMPACT_TRIGGER: env }), env).toBeNull();
+      writeGlobal({ compactionTrigger: percent });
+      expect(source({ PI_LCM_COMPACT_TRIGGER: env }), env).toBe("global");
+      writeGlobal({});
+    }
+  });
+});
+
+describe("parseCompactTriggerEnv", () => {
+  it("is_null_when_the_variable_is_unset", () => {
+    expect(parseCompactTriggerEnv({})).toBeNull();
+  });
+
+  it("parses_valid_values_and_reports_invalid_ones", () => {
+    expect(parseCompactTriggerEnv({ PI_LCM_COMPACT_TRIGGER: "40%" })).toEqual({ ok: true, trigger: { mode: "percent", value: 40 } });
+    for (const env of ["40", "", "abc"]) {
+      const parsed = parseCompactTriggerEnv({ PI_LCM_COMPACT_TRIGGER: env });
+      expect(parsed?.ok, env).toBe(false);
+    }
   });
 });
 

@@ -3,7 +3,7 @@ import { homedir } from "os";
 import { dirname, join, resolve } from "path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_COMPACTION_FOCUS } from "./compact/prompts.js";
-import { parseTriggerInput, sanitizeTrigger, type CompactionTrigger } from "./trigger.js";
+import { parseTriggerInput, sanitizeTrigger, type CompactionTrigger, type ParseTriggerResult } from "./trigger.js";
 import type { LcmConfig } from "./types.js";
 
 export const DEFAULT_CONFIG: LcmConfig = {
@@ -56,6 +56,12 @@ function readConfigFile(path: string): Partial<LcmConfig> | null {
   }
 }
 
+// Returns null when PI_LCM_COMPACT_TRIGGER is unset.
+export function parseCompactTriggerEnv(env: NodeJS.ProcessEnv): ParseTriggerResult | null {
+  const raw = env.PI_LCM_COMPACT_TRIGGER;
+  return raw === undefined ? null : parseTriggerInput(raw);
+}
+
 export function loadConfig(opts: { projectRoot: string; env: NodeJS.ProcessEnv; trusted: boolean }): LcmConfig {
   const { projectRoot, env, trusted } = opts;
   const paths = configPaths(projectRoot);
@@ -87,10 +93,8 @@ export function loadConfig(opts: { projectRoot: string; env: NodeJS.ProcessEnv; 
   if (env.PI_LCM_DEBUG !== undefined) {
     config.debug = env.PI_LCM_DEBUG === "1";
   }
-  if (env.PI_LCM_COMPACT_TRIGGER !== undefined) {
-    const parsed = parseTriggerInput(env.PI_LCM_COMPACT_TRIGGER);
-    if (parsed.ok) config.compactionTrigger = parsed.trigger;
-  }
+  const envTrigger = parseCompactTriggerEnv(env);
+  if (envTrigger?.ok) config.compactionTrigger = envTrigger.trigger;
   
   return config as LcmConfig;
 }
@@ -100,20 +104,27 @@ export type CompactionTriggerSource = "env" | "project" | "global";
 // Follows the same precedence as loadConfig.
 export function compactionTriggerSource(opts: { projectRoot: string; env: NodeJS.ProcessEnv; trusted: boolean }): CompactionTriggerSource | null {
   const { projectRoot, env, trusted } = opts;
-  if (env.PI_LCM_COMPACT_TRIGGER !== undefined) return "env";
+  if (parseCompactTriggerEnv(env)?.ok) return "env";
   const paths = configPaths(projectRoot);
   if (trusted && readConfigFile(paths.project)?.compactionTrigger) return "project";
   if (readConfigFile(paths.global)?.compactionTrigger) return "global";
   return null;
 }
 
-type RawConfigRead = { exists: false } | { exists: true; file: Record<string, unknown> | null };
+type RawConfigRead = { exists: false } | { exists: true; unreadable: true } | { exists: true; unreadable?: false; file: Record<string, unknown> | null };
 
 // Reads the file unsanitised so a save keeps every key. The file field is null when the content is not a JSON object.
+// A file that exists but cannot be read (permissions, a directory) is reported as unreadable, not as bad JSON.
 function readRawConfigFile(path: string): RawConfigRead {
   if (!existsSync(path)) return { exists: false };
+  let content: string;
   try {
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+    content = readFileSync(path, "utf-8");
+  } catch {
+    return { exists: true, unreadable: true };
+  }
+  try {
+    const parsed: unknown = JSON.parse(content);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { exists: true, file: null };
     return { exists: true, file: parsed as Record<string, unknown> };
   } catch {
@@ -123,7 +134,12 @@ function readRawConfigFile(path: string): RawConfigRead {
 
 export function globalConfigIsUnparseable(): boolean {
   const read = readRawConfigFile(configPaths("").global);
-  return read.exists && read.file === null;
+  return read.exists && !read.unreadable && read.file === null;
+}
+
+export function globalConfigIsUnreadable(): boolean {
+  const read = readRawConfigFile(configPaths("").global);
+  return read.exists && read.unreadable === true;
 }
 
 // Writes go to the real target so a symlinked lcm.json stays a link.
@@ -147,7 +163,7 @@ function updateGlobalConfig(changes: Partial<LcmConfig>): boolean {
   try {
     const target = resolveWriteTarget(configPaths("").global);
     const read = readRawConfigFile(target);
-    if (read.exists && read.file === null) return false;
+    if (read.exists && (read.unreadable || read.file === null)) return false;
     const existing = read.exists ? read.file : {};
     mkdirSync(dirname(target), { recursive: true });
     tempPath = `${target}.${process.pid}.tmp`;

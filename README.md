@@ -27,7 +27,7 @@ Configuration is loaded from three sources in order (later overrides earlier):
 
 1. **Global config**: `~/.pi/agent/lcm.json`
 2. **Project config**: `<project>/.pi/lcm.json` (only when the project is trusted)
-3. **Environment variables**: `PI_LCM_MODEL`, `PI_LCM_DB_PATH`, `PI_LCM_DEBUG`
+3. **Environment variables**: `PI_LCM_MODEL`, `PI_LCM_DB_PATH`, `PI_LCM_DEBUG`, `PI_LCM_COMPACT_TRIGGER`
 
 All keys and their defaults:
 
@@ -47,7 +47,8 @@ All keys and their defaults:
 | `recallThreshold` | `0.35` | Minimum BM25 score for memory recall. |
 | `autoMemories` | `true` | Whether to automatically extract and store memories. |
 | `storeThinking` | `false` | Whether to store thinking blocks. Disabled by default for privacy. |
-| `compactionFocus` | list of decisions, file paths, commit hashes, open threads, preferences and ledger or plan paths | Instructions sent to the summarizer for leaf and condensed summaries, after any `/compact` instructions. Set to `""` to send none. |
+| `compactionFocus` | list of decisions, file paths, commit hashes, open threads, preferences and ledger or plan paths | Instructions sent to the summarizer for leaf and condensed summaries, after any `/compact` instructions. Set to `""` to send none. A non-string value is ignored. |
+| `compactionTrigger` | `null` | When compaction starts, as `{"mode": "percent", "value": 40}` (share of the context window, 5 to 90), `{"mode": "tokens", "value": 400000}` (token count, at least 20000 and below the model's window) or `{"mode": "off", "value": 0}`. `null` means no trigger has been chosen. Invalid values are ignored. `PI_LCM_COMPACT_TRIGGER` overrides it and accepts `40%`, `400k`, `400000`, `1.5m` or `off`. |
 | `debug` | `false` | Enable verbose logging. |
 
 Example `~/.pi/agent/lcm.json`:

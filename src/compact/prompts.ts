@@ -11,7 +11,8 @@ export const DEFAULT_COMPACTION_FOCUS = [
 
 export function buildFocus(userFocus: string | undefined, configFocus: string): string | undefined {
   const config = typeof configFocus === "string" ? configFocus : DEFAULT_COMPACTION_FOCUS;
-  const parts = [userFocus?.trim() ?? "", config.trim()].filter((part) => part !== "");
+  const user = userFocus?.trim() ?? "";
+  const parts = [user === config.trim() ? "" : user, config.trim()].filter((part) => part !== "");
   return parts.length > 0 ? parts.join("\n\n") : undefined;
 }
 

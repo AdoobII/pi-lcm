@@ -38,6 +38,11 @@ describe("buildFocus", () => {
     expect(buildFocus("  ", "  \n")).toBeUndefined();
   });
 
+  it("build_focus_drops_user_focus_equal_to_config_focus", () => {
+    expect(buildFocus("keep file paths", "keep file paths")).toBe("keep file paths");
+    expect(buildFocus("  keep file paths\n", " keep file paths ")).toBe("keep file paths");
+  });
+
   it("build_focus_uses_whichever_side_is_present", () => {
     expect(buildFocus(undefined, "keep file paths")).toBe("keep file paths");
     expect(buildFocus("only user", "")).toBe("only user");

@@ -62,6 +62,14 @@ Example `~/.pi/agent/lcm.json`:
 }
 ```
 
+### Automatic compaction trigger
+
+With a `compactionTrigger` set, pi-lcm compacts on its own once a run has settled and usage reaches the threshold. It waits one second after the run settles and skips the check if a new prompt or run started in that time.
+
+- Print, json and SDK sessions never auto-compact.
+- RPC sessions auto-compact only when `PI_LCM_TRIGGER_IN_RPC=1` is set (environment variable only, off by default). The client must wait for `compaction_end`, or check `isCompacting` in `get_state`, before sending its next prompt, because a prompt sent during compaction is rejected. Set the variable only on the process you control: child processes inherit the environment, and any RPC-mode child would also auto-compact.
+- Interactive (TUI) sessions auto-compact whenever a trigger is set.
+
 ## Tools
 
 pi-lcm provides five native tools for exploring and managing your conversation history and memories.

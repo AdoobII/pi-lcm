@@ -3,6 +3,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_COMPACTION_FOCUS } from "./compact/prompts.js";
+import { parseTriggerInput, sanitizeTrigger, type CompactionTrigger } from "./trigger.js";
 import type { LcmConfig } from "./types.js";
 
 export const DEFAULT_CONFIG: LcmConfig = {
@@ -21,6 +22,7 @@ export const DEFAULT_CONFIG: LcmConfig = {
   autoMemories: true,
   storeThinking: false,
   compactionFocus: DEFAULT_COMPACTION_FOCUS,
+  compactionTrigger: null,
   debug: false,
 } as const;
 
@@ -31,10 +33,24 @@ export function configPaths(projectRoot: string): { global: string; project: str
   };
 }
 
+// Invalid values are dropped so the lower layer or the default applies.
+function sanitizeConfigFile(file: Record<string, unknown>): Record<string, unknown> {
+  const clean = { ...file };
+  if ("compactionFocus" in clean && typeof clean.compactionFocus !== "string") delete clean.compactionFocus;
+  if ("compactionTrigger" in clean) {
+    const trigger = sanitizeTrigger(clean.compactionTrigger);
+    if (trigger) clean.compactionTrigger = trigger;
+    else delete clean.compactionTrigger;
+  }
+  return clean;
+}
+
 function readConfigFile(path: string): Partial<LcmConfig> | null {
   try {
     const content = readFileSync(path, "utf-8");
-    return JSON.parse(content) as Partial<LcmConfig>;
+    const parsed: unknown = JSON.parse(content);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    return sanitizeConfigFile(parsed as Record<string, unknown>) as Partial<LcmConfig>;
   } catch {
     return null;
   }
@@ -71,6 +87,10 @@ export function loadConfig(opts: { projectRoot: string; env: NodeJS.ProcessEnv; 
   if (env.PI_LCM_DEBUG !== undefined) {
     config.debug = env.PI_LCM_DEBUG === "1";
   }
+  if (env.PI_LCM_COMPACT_TRIGGER !== undefined) {
+    const parsed = parseTriggerInput(env.PI_LCM_COMPACT_TRIGGER);
+    if (parsed.ok) config.compactionTrigger = parsed.trigger;
+  }
   
   return config as LcmConfig;
 }
@@ -80,6 +100,17 @@ export function saveModelChoice(model: string): void {
   try {
     const existing = readConfigFile(paths.global) ?? {};
     const updated = { ...existing, model };
+    writeFileSync(paths.global, JSON.stringify(updated, null, 2));
+  } catch {
+    // Swallow errors
+  }
+}
+
+export function saveTriggerChoice(trigger: CompactionTrigger): void {
+  const paths = configPaths("");
+  try {
+    const existing = readConfigFile(paths.global) ?? {};
+    const updated = { ...existing, compactionTrigger: trigger };
     writeFileSync(paths.global, JSON.stringify(updated, null, 2));
   } catch {
     // Swallow errors

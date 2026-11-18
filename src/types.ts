@@ -1,4 +1,5 @@
 import type { Usage } from "@earendil-works/pi-ai";
+import type { CompactionTrigger } from "./trigger.js";
 
 export type { Usage };
 export type MessageRole = "user" | "assistant" | "toolResult" | "custom" | "bashExecution";
@@ -95,6 +96,7 @@ export interface LcmConfig {
   autoMemories: boolean;
   storeThinking: boolean;
   compactionFocus: string;
+  compactionTrigger: CompactionTrigger | null;
   debug: boolean;
 }
 

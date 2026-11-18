@@ -11,7 +11,7 @@ vi.mock("../../src/util/log.js", () => ({
   logDebug: vi.fn(),
 }));
 
-import extension from "../../src/index.js";
+import extension, { setTriggerSettleDelayMs } from "../../src/index.js";
 import { createFakePi } from "../helpers/fake-pi.js";
 
 const PERCENT_OPTION = "Percent of context window (suggested: 40%)";
@@ -19,18 +19,25 @@ const TOKENS_OPTION = "Number of tokens";
 const OFF_OPTION = "Off (Pi's own threshold only)";
 const MODEL_PICKER_TITLE = "pi-lcm summarizer model";
 
+const SETTLE_DELAY_MS = 40;
+const usageWindow = 200_000;
+
 let cleanup: (() => void) | undefined;
+const tempDirs: string[] = [];
 
 afterEach(() => {
   logWarn.mockClear();
   cleanup?.();
   cleanup = undefined;
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 interface BootOptions {
   hasUI?: boolean;
   env?: string;
   saved?: unknown;
+  project?: unknown;
+  usageTokens?: number;
   modes?: (string | undefined)[];
   values?: (string | undefined)[];
   extraModelWindows?: number[];
@@ -38,15 +45,19 @@ interface BootOptions {
 
 async function boot(options: BootOptions = {}) {
   const cwd = mkdtempSync(join(tmpdir(), "pi-lcm-tp-"));
+  tempDirs.push(cwd);
+  setTriggerSettleDelayMs(SETTLE_DELAY_MS);
   execFileSync("git", ["init", "-q"], { cwd, stdio: "ignore" });
   const saved = { HOME: process.env.HOME, PI_LCM_MODEL: process.env.PI_LCM_MODEL, PI_LCM_DB_PATH: process.env.PI_LCM_DB_PATH, PI_LCM_COMPACT_TRIGGER: process.env.PI_LCM_COMPACT_TRIGGER };
   const home = mkdtempSync(join(tmpdir(), "pi-lcm-home-"));
+  tempDirs.push(home);
   process.env.HOME = home;
   process.env.PI_LCM_DB_PATH = ":memory:";
   process.env.PI_LCM_MODEL = "test/test-model";
   if (options.env !== undefined) process.env.PI_LCM_COMPACT_TRIGGER = options.env;
   else delete process.env.PI_LCM_COMPACT_TRIGGER;
   cleanup = () => {
+    setTriggerSettleDelayMs(1000);
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -55,15 +66,22 @@ async function boot(options: BootOptions = {}) {
   const lcmFile = join(home, ".pi", "agent", "lcm.json");
   if (options.saved !== undefined) {
     mkdirSync(join(home, ".pi", "agent"), { recursive: true });
-    writeFileSync(lcmFile, JSON.stringify(options.saved));
+    writeFileSync(lcmFile, typeof options.saved === "string" ? options.saved : JSON.stringify(options.saved));
+  }
+  if (options.project !== undefined) {
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "lcm.json"), JSON.stringify(options.project));
   }
 
   const modes = [...(options.modes ?? [])];
   const values = [...(options.values ?? [])];
   const asked = { selects: 0, inputs: 0 };
   const notifications: string[] = [];
+  const compactCalls: unknown[] = [];
   const fake = createFakePi({
     cwd,
+    getContextUsage: () => ({ tokens: options.usageTokens ?? 0, contextWindow: usageWindow, percent: null }),
+    compact: (compactOptions) => compactCalls.push(compactOptions),
     hasUI: options.hasUI ?? true,
     extraModelWindows: options.extraModelWindows,
     notify: (message) => notifications.push(message),
@@ -80,7 +98,13 @@ async function boot(options: BootOptions = {}) {
   await extension(fake.api);
   await fake.emit("session_start", { type: "session_start", reason: "startup" });
   const readSaved = () => (existsSync(lcmFile) ? JSON.parse(readFileSync(lcmFile, "utf-8")) : null);
-  return { fake, asked, notifications, readSaved, lcmFile, home };
+  const compactsAtSettle = async () => {
+    compactCalls.length = 0;
+    await fake.emit("agent_settled", { type: "agent_settled" });
+    await new Promise((resolve) => setTimeout(resolve, SETTLE_DELAY_MS + 40));
+    return compactCalls.length > 0;
+  };
+  return { fake, asked, notifications, readSaved, lcmFile, home, compactsAtSettle };
 }
 
 describe("first-run trigger prompt", () => {
@@ -148,12 +172,13 @@ describe("first-run trigger prompt", () => {
   it("reserve_tokens_hint_is_notified", async () => {
     const { notifications } = await boot({ modes: [PERCENT_OPTION], values: ["40"], extraModelWindows: [1_000_000] });
     expect(notifications).toContain(
-      "For Pi's own settings.json: reserveTokens 600000 for a 1000000-token window; reserveTokens 120000 for a 200000-token window",
+      "For Pi's own settings.json compaction.reserveTokens: 600000 for a 1000000-token window; 120000 for a 200000-token window",
     );
   });
 
   it("save_failure_notifies_and_applies_for_session", async () => {
-    const { fake, notifications, home } = await boot({ saved: { compactionTrigger: { mode: "off", value: 0 } } });
+    const { fake, notifications, home, compactsAtSettle } = await boot({ saved: { compactionTrigger: { mode: "off", value: 0 } }, usageTokens: 60_000 });
+    expect(await compactsAtSettle()).toBe(false);
     // Replace the config directory with a file so the save fails.
     rmSync(join(home, ".pi"), { recursive: true, force: true });
     writeFileSync(join(home, ".pi"), "blocked");
@@ -164,6 +189,16 @@ describe("first-run trigger prompt", () => {
     await fake.commands.get("lcm-trigger")!.handler("", fake.context);
     expect(notifications.some((m) => m.startsWith("pi-lcm: could not save the trigger choice to ") && m.endsWith("; it applies for this session only"))).toBe(true);
     expect(notifications.some((m) => m.includes("25%"))).toBe(true);
+    // 25% of the 200000-token window is 50000, so 60000 tokens compacts only if the session took the trigger.
+    expect(await compactsAtSettle()).toBe(true);
+  });
+
+  it("unparseable_lcm_json_is_not_overwritten_and_the_choice_applies_for_the_session", async () => {
+    const { notifications, lcmFile, compactsAtSettle } = await boot({ saved: "{ not json", modes: [PERCENT_OPTION], values: ["25"], usageTokens: 60_000 });
+    expect(notifications).toContain("pi-lcm: lcm.json is not valid JSON; fix or remove it, choice applies for this session only");
+    expect(notifications.some((m) => m.startsWith("pi-lcm: could not save the trigger choice"))).toBe(false);
+    expect(readFileSync(lcmFile, "utf-8")).toBe("{ not json");
+    expect(await compactsAtSettle()).toBe(true);
   });
 });
 
@@ -194,5 +229,22 @@ describe("/lcm-trigger", () => {
     ctx.ui.select = async () => choices.modes.shift();
     await fake.commands.get("lcm-trigger")!.handler("", fake.context);
     expect(notifications.some((m) => m.includes("PI_LCM_COMPACT_TRIGGER") && m.includes("overrides"))).toBe(true);
+  });
+
+  it("command_with_a_project_trigger_saves_globally_keeps_the_session_and_warns", async () => {
+    const { fake, notifications, readSaved, compactsAtSettle } = await boot({
+      project: { compactionTrigger: { mode: "percent", value: 80 } },
+      usageTokens: 60_000,
+    });
+    expect(await compactsAtSettle()).toBe(false);
+    const choices = { modes: [PERCENT_OPTION], values: ["25"] };
+    const ctx = fake.context as unknown as { ui: { select: unknown; input: unknown } };
+    ctx.ui.select = async () => choices.modes.shift();
+    ctx.ui.input = async () => choices.values.shift();
+    await fake.commands.get("lcm-trigger")!.handler("", fake.context);
+    expect(readSaved().compactionTrigger).toEqual({ mode: "percent", value: 25 });
+    expect(notifications.some((m) => m.includes(".pi") && m.includes("lcm.json") && m.includes("overrides") && m.includes("25%"))).toBe(true);
+    expect(notifications.some((m) => m === "pi-lcm: compaction trigger set to 25% of the context window")).toBe(false);
+    expect(await compactsAtSettle()).toBe(false);
   });
 });

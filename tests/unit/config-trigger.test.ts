@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_CONFIG, globalConfigIsUnparseable, loadConfig, saveModelChoice, saveTriggerChoice } from "../../src/config.js";
+import { DEFAULT_CONFIG, compactionTriggerSource, globalConfigIsUnparseable, loadConfig, saveModelChoice, saveTriggerChoice } from "../../src/config.js";
 import { DEFAULT_COMPACTION_FOCUS } from "../../src/compact/prompts.js";
 
 let home: string;
@@ -187,6 +187,35 @@ describe("global config save safety", () => {
     chmodSync(globalFile(), 0o600);
     expect(saveTriggerChoice({ mode: "off", value: 0 })).toBe(true);
     expect(statSync(globalFile()).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe("compactionTriggerSource", () => {
+  const percent = { mode: "percent", value: 40 };
+  const source = (env: NodeJS.ProcessEnv = {}, trusted = true) => compactionTriggerSource({ projectRoot, env, trusted });
+
+  it("is_null_when_no_layer_sets_a_trigger", () => {
+    expect(source()).toBeNull();
+  });
+
+  it("names_the_global_layer", () => {
+    writeGlobal({ compactionTrigger: percent });
+    expect(source()).toBe("global");
+  });
+
+  it("names_the_project_layer_only_when_trusted_and_valid", () => {
+    writeGlobal({ compactionTrigger: percent });
+    writeProject({ compactionTrigger: { mode: "tokens", value: 300000 } });
+    expect(source()).toBe("project");
+    expect(source({}, false)).toBe("global");
+    writeProject({ compactionTrigger: { mode: "percent", value: 4 } });
+    expect(source()).toBe("global");
+  });
+
+  it("names_the_env_layer_whenever_the_variable_is_set", () => {
+    writeProject({ compactionTrigger: percent });
+    expect(source({ PI_LCM_COMPACT_TRIGGER: "30%" })).toBe("env");
+    expect(source({ PI_LCM_COMPACT_TRIGGER: "garbage" })).toBe("env");
   });
 });
 

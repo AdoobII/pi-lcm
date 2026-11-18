@@ -15,7 +15,7 @@ import { buildFocus } from "./compact/prompts.js";
 import { shouldCompact } from "./trigger-runtime.js";
 import { createRecallState, buildRestoreBlock, buildPromptBlock } from "./recall/inject.js";
 import { registerTools, ToolDeps } from "./tools/index.js";
-import { loadConfig, saveModelChoice, saveTriggerChoice, configPaths, DEFAULT_CONFIG } from "./config.js";
+import { loadConfig, saveModelChoice, saveTriggerChoice, compactionTriggerSource, globalConfigIsUnparseable, configPaths, DEFAULT_CONFIG, type CompactionTriggerSource } from "./config.js";
 import { askTrigger } from "./trigger-prompt.js";
 import { DEFAULT_KEEP_RECENT_TOKENS, type CompactionTrigger } from "./trigger.js";
 import { createExtensionState, ExtensionState } from "./state.js";
@@ -395,23 +395,33 @@ function collectContextWindows(ctx: ExtensionContext): number[] {
   return windows.filter((window) => Number.isFinite(window) && window > 0);
 }
 
-function isTriggerEnvOverridden(): boolean {
-  return process.env.PI_LCM_COMPACT_TRIGGER !== undefined;
+function overridingTriggerSource(ctx: ExtensionContext): "env" | "project" | null {
+  const source: CompactionTriggerSource | null = compactionTriggerSource({
+    projectRoot: state.projectRoot ?? ctx.cwd,
+    env: process.env,
+    trusted: ctx.isProjectTrusted(),
+  });
+  return source === "env" || source === "project" ? source : null;
 }
 
-async function promptAndSaveTrigger(ctx: ExtensionContext): Promise<CompactionTrigger | undefined> {
+async function promptAndSaveTrigger(ctx: ExtensionContext): Promise<{ trigger: CompactionTrigger; overriddenBy: "env" | "project" | null } | undefined> {
   const trigger = await askTrigger(ctx, collectContextWindows(ctx), readKeepRecentTokens());
   if (!trigger) {
     return undefined;
   }
+  const overriddenBy = overridingTriggerSource(ctx);
   if (!saveTriggerChoice(trigger)) {
-    ctx.ui.notify(`pi-lcm: could not save the trigger choice to ${configPaths("").global}; it applies for this session only`, "warning");
+    if (globalConfigIsUnparseable()) {
+      ctx.ui.notify("pi-lcm: lcm.json is not valid JSON; fix or remove it, choice applies for this session only", "warning");
+    } else {
+      ctx.ui.notify(`pi-lcm: could not save the trigger choice to ${configPaths("").global}; it applies for this session only`, "warning");
+    }
   }
-  if (!isTriggerEnvOverridden()) {
+  if (overriddenBy === null) {
     state.config = { ...state.config, compactionTrigger: trigger };
     state.lastFailure = null;
   }
-  return trigger;
+  return { trigger, overriddenBy };
 }
 
 function describeTrigger(trigger: CompactionTrigger): string {
@@ -421,16 +431,16 @@ function describeTrigger(trigger: CompactionTrigger): string {
 }
 
 async function runFirstTriggerPrompt(ctx: ExtensionContext): Promise<void> {
-  if (state.config.compactionTrigger !== null || isTriggerEnvOverridden()) {
+  if (state.config.compactionTrigger !== null || process.env.PI_LCM_COMPACT_TRIGGER !== undefined) {
     return;
   }
   if (!ctx.hasUI) {
     logWarn("pi-lcm: no compaction trigger chosen; run /lcm-trigger in an interactive session to choose one");
     return;
   }
-  const trigger = await promptAndSaveTrigger(ctx);
-  if (trigger) {
-    ctx.ui.notify(`pi-lcm: compaction trigger set to ${describeTrigger(trigger)}`);
+  const result = await promptAndSaveTrigger(ctx);
+  if (result) {
+    ctx.ui.notify(`pi-lcm: compaction trigger set to ${describeTrigger(result.trigger)}`);
   }
 }
 
@@ -882,13 +892,18 @@ async function handleLcmTriggerCommand(_args: string, ctx: ExtensionCommandConte
     if (!ctx.hasUI) {
       return;
     }
-    const trigger = await promptAndSaveTrigger(ctx);
-    if (!trigger) {
+    const result = await promptAndSaveTrigger(ctx);
+    if (!result) {
       ctx.ui.notify("pi-lcm: compaction trigger unchanged");
       return;
     }
-    if (isTriggerEnvOverridden()) {
+    const { trigger, overriddenBy } = result;
+    if (overriddenBy === "env") {
       ctx.ui.notify(`pi-lcm: saved ${describeTrigger(trigger)}, but PI_LCM_COMPACT_TRIGGER overrides the saved choice while it is set`, "warning");
+      return;
+    }
+    if (overriddenBy === "project") {
+      ctx.ui.notify(`pi-lcm: saved ${describeTrigger(trigger)}, but the compactionTrigger in ${configPaths(state.projectRoot ?? ctx.cwd).project} overrides the saved choice in this project`, "warning");
       return;
     }
     ctx.ui.notify(`pi-lcm: compaction trigger set to ${describeTrigger(trigger)}`);

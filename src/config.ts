@@ -95,6 +95,18 @@ export function loadConfig(opts: { projectRoot: string; env: NodeJS.ProcessEnv; 
   return config as LcmConfig;
 }
 
+export type CompactionTriggerSource = "env" | "project" | "global";
+
+// Follows the same precedence as loadConfig.
+export function compactionTriggerSource(opts: { projectRoot: string; env: NodeJS.ProcessEnv; trusted: boolean }): CompactionTriggerSource | null {
+  const { projectRoot, env, trusted } = opts;
+  if (env.PI_LCM_COMPACT_TRIGGER !== undefined) return "env";
+  const paths = configPaths(projectRoot);
+  if (trusted && readConfigFile(paths.project)?.compactionTrigger) return "project";
+  if (readConfigFile(paths.global)?.compactionTrigger) return "global";
+  return null;
+}
+
 type RawConfigRead = { exists: false } | { exists: true; file: Record<string, unknown> | null };
 
 // Reads the file unsanitised so a save keeps every key. The file field is null when the content is not a JSON object.

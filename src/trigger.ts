@@ -7,6 +7,7 @@ export type ThresholdResult = { tokens: number } | { tokens: null; reason: strin
 export const MIN_TRIGGER_PERCENT = 5;
 export const MAX_TRIGGER_PERCENT = 90;
 export const MIN_TRIGGER_TOKENS = 20000;
+export const DEFAULT_KEEP_RECENT_TOKENS = 20000;
 
 const NUMBER_PATTERN = /^(\d+(?:\.\d+)?)\s*([%km]?)$/;
 const TOKEN_MULTIPLIER: Record<string, number> = { "": 1, k: 1_000, m: 1_000_000 };

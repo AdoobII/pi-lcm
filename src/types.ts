@@ -94,6 +94,7 @@ export interface LcmConfig {
   recallThreshold: number;
   autoMemories: boolean;
   storeThinking: boolean;
+  compactionFocus: string;
   debug: boolean;
 }
 

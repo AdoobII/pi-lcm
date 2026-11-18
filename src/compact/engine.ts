@@ -263,7 +263,8 @@ function insertPendingNode(db: Db, projectId: string, node: PendingNode): Summar
 async function condenseDepth(
   deps: CompactionDeps,
   depth: number,
-  usages: Usage[]
+  usages: Usage[],
+  customInstructions: string | undefined
 ): Promise<void> {
   const { db, projectId, sessionId, config } = deps;
 
@@ -314,7 +315,7 @@ async function condenseDepth(
       const opts: SummarizeOptions = {
         depth: depth + 1,
         aggressive: false,
-        customInstructions: undefined,
+        customInstructions,
         signal: undefined,
       };
 
@@ -458,7 +459,7 @@ export async function compactSpan(
 
     // 5. Condense
     for (let depth = 0; depth < config.maxDepth; depth++) {
-      await condenseDepth(deps, depth, usages);
+      await condenseDepth(deps, depth, usages, customInstructions);
     }
 
     // 6. Render context

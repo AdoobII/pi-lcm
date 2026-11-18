@@ -47,6 +47,7 @@ All keys and their defaults:
 | `recallThreshold` | `0.35` | Minimum BM25 score for memory recall. |
 | `autoMemories` | `true` | Whether to automatically extract and store memories. |
 | `storeThinking` | `false` | Whether to store thinking blocks. Disabled by default for privacy. |
+| `compactionFocus` | list of decisions, file paths, commit hashes, open threads, preferences and ledger or plan paths | Instructions sent to the summarizer for leaf and condensed summaries, after any `/compact` instructions. Set to `""` to send none. |
 | `debug` | `false` | Enable verbose logging. |
 
 Example `~/.pi/agent/lcm.json`:

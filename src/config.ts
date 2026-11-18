@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_COMPACTION_FOCUS } from "./compact/prompts.js";
 import type { LcmConfig } from "./types.js";
 
 export const DEFAULT_CONFIG: LcmConfig = {
@@ -19,6 +20,7 @@ export const DEFAULT_CONFIG: LcmConfig = {
   recallThreshold: 0.35,
   autoMemories: true,
   storeThinking: false,
+  compactionFocus: DEFAULT_COMPACTION_FOCUS,
   debug: false,
 } as const;
 

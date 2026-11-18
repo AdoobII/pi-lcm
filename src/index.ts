@@ -11,6 +11,7 @@ import { migrate, SchemaTooNewError } from "./db/schema.js";
 import { resolveDbPath, ensureDbDirectory } from "./db/path.js";
 import { compactSpan, CompactionDeps, CompactionSpan, CompactionOutcome } from "./compact/engine.js";
 import { createSummarizer, resolveModel as resolvePiModel, NoModelError } from "./compact/summarizer.js";
+import { buildFocus } from "./compact/prompts.js";
 import { createRecallState, buildRestoreBlock, buildPromptBlock } from "./recall/inject.js";
 import { registerTools, ToolDeps } from "./tools/index.js";
 import { loadConfig, saveModelChoice, DEFAULT_CONFIG } from "./config.js";
@@ -427,6 +428,7 @@ async function handleSessionBeforeCompact(event: {
   type: string;
   preparation: { firstKeptEntryId: string; tokensBefore: number };
   branchEntries: SessionEntry[];
+  customInstructions?: string;
   reason: string;
   willRetry: boolean;
   signal: AbortSignal;
@@ -454,7 +456,7 @@ async function handleSessionBeforeCompact(event: {
     const span = computeCompactionSpan({
       preparation: event.preparation,
       branchEntries: event.branchEntries,
-      customInstructions: undefined,
+      customInstructions: buildFocus(event.customInstructions, state.config.compactionFocus),
       signal: event.signal,
     });
     

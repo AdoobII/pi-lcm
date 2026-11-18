@@ -1,5 +1,19 @@
 import type { MemoryDraft } from "../types.js";
 
+export const DEFAULT_COMPACTION_FOCUS = [
+  "Keep these in the summary:",
+  "- rulings and decisions, with their reasons",
+  "- file paths and commit hashes",
+  "- open threads and unfinished work",
+  "- user preferences",
+  "- any ledger or plan path, with an instruction to re-read it after compaction",
+].join("\n");
+
+export function buildFocus(userFocus: string | undefined, configFocus: string): string | undefined {
+  const parts = [userFocus?.trim() ?? "", configFocus.trim()].filter((part) => part !== "");
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
 export function leafPrompt(depth: number, aggressive: boolean, customInstructions?: string): string {
   const role = "You compress conversation history into a durable summary";
   const sections = [

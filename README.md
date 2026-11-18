@@ -19,6 +19,8 @@ On first activation, pi-lcm has no summarizer model configured. You must choose 
 - Use the model picker: run `/lcm-model` and select from available models.
 - Or set `PI_LCM_MODEL` in your environment.
 
+After the model, an interactive first run asks when compaction should start: a percent of the context window (40% is suggested), a token count, or Off. The choice is saved as `compactionTrigger` in `~/.pi/agent/lcm.json`. pi-lcm also prints the matching Pi `reserveTokens` value for each context window, which you can add to Pi's `settings.json` by hand. Run `/lcm-trigger` to choose again. `PI_LCM_COMPACT_TRIGGER` skips the prompt and overrides the saved choice. Without a UI (print or JSON mode) pi-lcm does not prompt.
+
 Until a model is chosen, pi-lcm **will not perform summarization**. It will still persist messages and fall back to Pi's default compaction. In print mode and JSON mode, if no model is chosen, pi-lcm skips all compaction work entirely.
 
 ## Configuration
